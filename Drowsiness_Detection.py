@@ -5,9 +5,15 @@ import dlib
 import cv2
 import serial
 import time
-import Adafruit_DHT
-from smbus2 import SMBus
 import math
+try:
+    import Adafruit_DHT
+except ImportError:
+    Adafruit_DHT = None
+try:
+    from smbus2 import SMBus
+except ImportError:
+    SMBus = None
 
 # --- Drowsiness Detection Setup ---
 def eye_aspect_ratio(eye):
@@ -17,7 +23,7 @@ def eye_aspect_ratio(eye):
     ear = (A + B) / (2.0 * C)
     return ear
 
-thresh = 0.25
+uart = serial.Serial('/dev/ttyUSB0', baudrate=9600, timeout=1)
 frame_check = 20
 detect = dlib.get_frontal_face_detector()
 predict = dlib.shape_predictor("models/shape_predictor_68_face_landmarks.dat")
@@ -27,48 +33,62 @@ cap = cv2.VideoCapture(0)
 flag = 0
 
 # --- DHT11 Setup ---
-DHT_SENSOR = Adafruit_DHT.DHT11
-DHT_PIN = 4  # GPIO pin
+if Adafruit_DHT:
+    DHT_SENSOR = Adafruit_DHT.DHT11
+    DHT_PIN = 4  # GPIO pin
+else:
+    DHT_SENSOR = None
+    DHT_PIN = None
 
 # --- MPU6050 Setup ---
-MPU6050_ADDR = 0x68
-bus = SMBus(1)
-bus.write_byte_data(MPU6050_ADDR, 0x6B, 0)  # Wake up MPU6050
-
-def read_mpu6050():
-    def read_word(reg):
-        h = bus.read_byte_data(MPU6050_ADDR, reg)
-        l = bus.read_byte_data(MPU6050_ADDR, reg+1)
-        val = (h << 8) + l
-        if val >= 0x8000:
-            val = -((65535 - val) + 1)
-        return val
-    accel_x = read_word(0x3B) / 16384.0
-    accel_y = read_word(0x3D) / 16384.0
-    accel_z = read_word(0x3F) / 16384.0
-    gyro_x = read_word(0x43) / 131.0
-    gyro_y = read_word(0x45) / 131.0
-    gyro_z = read_word(0x47) / 131.0
-    return accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z
+if SMBus:
+    MPU6050_ADDR = 0x68
+    bus = SMBus(1)
+    bus.write_byte_data(MPU6050_ADDR, 0x6B, 0)  # Wake up MPU6050
+    def read_mpu6050():
+        def read_word(reg):
+            h = bus.read_byte_data(MPU6050_ADDR, reg)
+            l = bus.read_byte_data(MPU6050_ADDR, reg+1)
+            val = (h << 8) + l
+            if val >= 0x8000:
+                val = -((65535 - val) + 1)
+            return val
+        accel_x = read_word(0x3B) / 16384.0
+        accel_y = read_word(0x3D) / 16384.0
+        accel_z = read_word(0x3F) / 16384.0
+        gyro_x = read_word(0x43) / 131.0
+        gyro_y = read_word(0x45) / 131.0
+        gyro_z = read_word(0x47) / 131.0
+        return accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z
+else:
+    def read_mpu6050():
+        return -1, -1, -1, -1, -1, -1
 
 # --- GPS Setup (NEO-6M) ---
-gps_serial = serial.Serial('/dev/ttyS0', baudrate=9600, timeout=1)
-
-def read_gps():
-    try:
-        line = gps_serial.readline().decode('ascii', errors='replace')
-        if line.startswith('$GPGGA'):
-            parts = line.split(',')
-            if len(parts) > 5 and parts[2] and parts[4]:
-                lat = float(parts[2])
-                lon = float(parts[4])
-                return lat, lon
-    except Exception:
-        pass
-    return None, None
+try:
+    gps_serial = serial.Serial('/dev/ttyS0', baudrate=9600, timeout=1)
+    def read_gps():
+        try:
+            line = gps_serial.readline().decode('ascii', errors='replace')
+            if line.startswith('$GPGGA'):
+                parts = line.split(',')
+                if len(parts) > 5 and parts[2] and parts[4]:
+                    lat = float(parts[2])
+                    lon = float(parts[4])
+                    return lat, lon
+        except Exception:
+            pass
+        return None, None
+except Exception:
+    gps_serial = None
+    def read_gps():
+        return None, None
 
 # --- UART Setup (HC-12) ---
-uart = serial.Serial('/dev/ttyUSB0', baudrate=9600, timeout=1)
+try:
+    uart = serial.Serial('/dev/ttyUSB0', baudrate=9600, timeout=1)
+except Exception:
+    uart = None
 
 while True:
     # Drowsiness Detection
@@ -101,9 +121,13 @@ while True:
             flag = 0
     cv2.imshow("Frame", frame)
 
+
     # DHT11 Reading
-    humidity, temperature = Adafruit_DHT.read_retry(DHT_SENSOR, DHT_PIN)
-    if humidity is None or temperature is None:
+    if Adafruit_DHT and DHT_SENSOR and DHT_PIN is not None:
+        humidity, temperature = Adafruit_DHT.read_retry(DHT_SENSOR, DHT_PIN)
+        if humidity is None or temperature is None:
+            humidity, temperature = -1, -1
+    else:
         humidity, temperature = -1, -1
 
     # MPU6050 Reading
@@ -122,17 +146,23 @@ while True:
     print(data)
 
     # Send data via UART (HC-12)
-    try:
-        uart.write(data.encode())
-    except Exception as e:
-        print("UART send error:", e)
+    if uart:
+        try:
+            uart.write(data.encode())
+        except Exception as e:
+            print("UART send error:", e)
 
     key = cv2.waitKey(1) & 0xFF
     if key == ord("q"):
         break
 
-cv2.destroyAllWindows()
-cap.release()
-uart.close()
 gps_serial.close()
 bus.close()
+cv2.destroyAllWindows()
+cap.release()
+if uart:
+    uart.close()
+if gps_serial:
+    gps_serial.close()
+if SMBus and 'bus' in locals():
+    bus.close()
