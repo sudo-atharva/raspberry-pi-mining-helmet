@@ -1,0 +1,8 @@
+opencv-python
+imutils
+dlib
+scipy
+pyserial
+smbus2
+Adafruit_DHT
+picamera2

@@ -19,7 +19,7 @@ This project detects driver drowsiness using computer vision and integrates real
 ### 1. Hardware Required
 
 - Raspberry Pi 4 (4GB RAM recommended)
-- USB webcam
+- USB webcam or Pi Camera (Picamera2)
 - DHT11 sensor (GPIO 4 by default)
 - MPU6050 (I2C)
 - NEO-6M GPS (UART, /dev/ttyS0)
@@ -27,19 +27,25 @@ This project detects driver drowsiness using computer vision and integrates real
 
 ### 2. Software Setup
 
-Install dependencies:
+
+Install dependencies (for both USB webcam and Pi Camera support):
 
 ```sh
 sudo apt-get update
-sudo apt-get install python3-opencv python3-pip libgpiod2
-pip3 install imutils dlib scipy pyserial smbus2 Adafruit_DHT
+sudo apt-get install python3-opencv python3-picamera2 python3-pip libgpiod2
+pip3 install imutils dlib scipy pyserial smbus2 Adafruit_DHT picamera2
 ```
 
+If using a Raspberry Pi camera, ensure the camera interface is enabled in `raspi-config`.
+
 ### 3. Running the Code
+
 
 ```sh
 python3 Drowsiness_Detection.py
 ```
+
+The script will automatically use a USB webcam if available, or fall back to Pi Camera (Picamera2) if running on a Raspberry Pi and no webcam is detected.
 
 The script will start the webcam, perform drowsiness detection, and attempt to read all sensors. If a sensor is not connected, its value will be reported as -1. All data is sent via UART (HC-12) in a single line per frame.
 

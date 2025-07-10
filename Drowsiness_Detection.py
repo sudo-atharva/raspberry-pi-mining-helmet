@@ -3,6 +3,8 @@ from imutils import face_utils
 import imutils
 import dlib
 import cv2
+import platform
+import importlib
 import serial
 import time
 import math
@@ -23,13 +25,44 @@ def eye_aspect_ratio(eye):
     ear = (A + B) / (2.0 * C)
     return ear
 
-uart = serial.Serial('/dev/ttyUSB0', baudrate=9600, timeout=1)
+# --- Robust UART Setup (HC-12) ---
+uart = None
+try:
+    uart = serial.Serial('/dev/ttyUSB0', baudrate=9600, timeout=1)
+except Exception:
+    uart = None
 frame_check = 20
 detect = dlib.get_frontal_face_detector()
 predict = dlib.shape_predictor("models/shape_predictor_68_face_landmarks.dat")
 (lStart, lEnd) = face_utils.FACIAL_LANDMARKS_68_IDXS["left_eye"]
 (rStart, rEnd) = face_utils.FACIAL_LANDMARKS_68_IDXS["right_eye"]
-cap = cv2.VideoCapture(0)
+picam2 = None
+cap = None
+# --- Robust Camera Selection: USB webcam or PiCamera2 ---
+if platform.system() == 'Linux':
+    try:
+        # Try USB webcam first
+        cap = cv2.VideoCapture(0)
+        if not cap.isOpened():
+            cap = None
+    except Exception:
+        cap = None
+    if cap is None:
+        try:
+            picamera2_mod = importlib.util.find_spec("picamera2")
+            if picamera2_mod is not None:
+                from picamera2 import Picamera2
+                picam2 = Picamera2()
+                picam2.start()
+        except Exception:
+            picam2 = None
+else:
+    try:
+        cap = cv2.VideoCapture(0)
+        if not cap.isOpened():
+            cap = None
+    except Exception:
+        cap = None
 flag = 0
 
 # --- DHT11 Setup ---
@@ -90,9 +123,22 @@ try:
 except Exception:
     uart = None
 
+
 while True:
-    # Drowsiness Detection
-    ret, frame = cap.read()
+    # Camera frame capture (USB webcam or PiCamera2)
+    frame = None
+    ret = False
+    if cap is not None:
+        ret, frame = cap.read()
+    elif picam2 is not None:
+        try:
+            frame = picam2.capture_array()
+            ret = frame is not None
+        except Exception:
+            ret = False
+    if not ret or frame is None:
+        print("No camera available or failed to capture frame.")
+        break
     frame = imutils.resize(frame, width=450)
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     subjects = detect(gray, 0)
@@ -156,13 +202,18 @@ while True:
     if key == ord("q"):
         break
 
-gps_serial.close()
-bus.close()
-cv2.destroyAllWindows()
-cap.release()
-if uart:
-    uart.close()
-if gps_serial:
+# --- Cleanup ---
+if 'gps_serial' in locals() and gps_serial:
     gps_serial.close()
 if SMBus and 'bus' in locals():
     bus.close()
+cv2.destroyAllWindows()
+if cap is not None:
+    cap.release()
+if picam2 is not None:
+    try:
+        picam2.close()
+    except Exception:
+        pass
+if uart:
+    uart.close()
