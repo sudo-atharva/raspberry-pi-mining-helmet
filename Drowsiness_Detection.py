@@ -7,6 +7,8 @@ import platform
 import importlib
 import serial
 import time
+from collections import deque  # For FPS calculation
+from datetime import datetime
 import math
 import os
 import sys
@@ -74,6 +76,12 @@ picam2 = None
 cap = None
 
 # --- Robust Camera Selection: USB webcam or PiCamera2 ---
+def get_fps(frame_times, n=30):
+    """Calculate FPS from a deque of frame timestamps"""
+    if len(frame_times) < 2:
+        return 0
+    return len(frame_times)/(frame_times[-1] - frame_times[0])
+
 def initialize_camera():
     """Initialize camera with fallback options"""
     global cap, picam2
@@ -82,7 +90,11 @@ def initialize_camera():
     try:
         cap = cv2.VideoCapture(0)
         if cap.isOpened():
-            # Test if camera actually works
+            # Set optimized camera parameters
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            cap.set(cv2.CAP_PROP_FPS, 30)
+            # Test camera
             ret, frame = cap.read()
             if ret and frame is not None:
                 print("Using USB webcam via OpenCV.")
@@ -101,7 +113,15 @@ def initialize_camera():
             if picamera2_spec is not None:
                 from picamera2 import Picamera2
                 picam2 = Picamera2()
-                picam2.configure(picam2.create_preview_configuration(main={"format": 'XRGB8888', "size": (640, 480)}))
+                # Optimize PiCamera2 settings for performance
+                picam2.configure(picam2.create_preview_configuration(
+                    main={"format": 'RGB888',  # Direct RGB format
+                          "size": (640, 480)},
+                    controls={"FrameRate": 30,
+                             "AwbEnable": 0,  # Disable auto white balance
+                             "AeEnable": 1,   # Keep auto exposure
+                             "NoiseReductionMode": 0}  # Minimal noise reduction
+                ))
                 picam2.start()
                 print("Using PiCamera2.")
                 return True
@@ -216,9 +236,22 @@ if uart:
 print("Starting drowsiness detection system...")
 print("Press 'q' to quit")
 
+# Initialize performance monitoring
+frame_times = deque(maxlen=30)  # Store last 30 frame timestamps
+last_fps_print = time.time()
+fps_print_interval = 5  # Print FPS every 5 seconds
+
+# Initialize face detection ROI
+roi_scale = 1.0  # Dynamic ROI scaling
+min_roi_scale = 0.3  # Minimum ROI scale
+max_roi_scale = 1.0  # Maximum ROI scale
+target_fps = 15  # Target FPS
+
 # Main loop
 try:
     while True:
+        loop_start = time.time()
+        
         # Camera frame capture
         frame = None
         ret = False
@@ -228,9 +261,9 @@ try:
         elif picam2 is not None:
             try:
                 frame = picam2.capture_array()
-                # Convert from XRGB8888 to BGR for OpenCV
                 if frame is not None:
-                    frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+                    if frame.shape[-1] == 4:  # Only convert if 4 channels
+                        frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
                     ret = True
             except Exception as e:
                 print(f"PiCamera2 capture error: {e}")
@@ -241,34 +274,49 @@ try:
             time.sleep(0.1)
             continue
         
-        # Resize frame for processing
-        frame = imutils.resize(frame, width=450)
+        # Dynamic frame resizing based on performance
+        frame = imutils.resize(frame, width=int(640 * roi_scale))
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
-        # Detect faces
-        subjects = detect(gray, 0)
+        # Performance monitoring
+        frame_times.append(loop_start)
+        current_fps = get_fps(frame_times)
+        
+        # Adjust ROI scale based on FPS
+        if current_fps < target_fps - 2 and roi_scale > min_roi_scale:
+            roi_scale = max(roi_scale * 0.95, min_roi_scale)
+        elif current_fps > target_fps + 2 and roi_scale < max_roi_scale:
+            roi_scale = min(roi_scale * 1.05, max_roi_scale)
+        
+        # Print FPS periodically
+        if time.time() - last_fps_print > fps_print_interval:
+            print(f"FPS: {current_fps:.1f}, ROI Scale: {roi_scale:.2f}")
+            last_fps_print = time.time()
+        
+        # Face detection with ROI optimization
+        subjects = detect(gray, 0)  # 0 = Don't upsample image
         drowsy = 0
         
         for subject in subjects:
             shape = predict(gray, subject)
             shape = face_utils.shape_to_np(shape)
             
-            # Extract eye regions
+            # Extract and process eye regions
             leftEye = shape[lStart:lEnd]
             rightEye = shape[rStart:rEnd]
             
-            # Calculate eye aspect ratios
+            # Calculate eye aspect ratios (EAR)
             leftEAR = eye_aspect_ratio(leftEye)
             rightEAR = eye_aspect_ratio(rightEye)
             ear = (leftEAR + rightEAR) / 2.0
             
-            # Draw eye contours
+            # Visualize eye detection
             leftEyeHull = cv2.convexHull(leftEye)
             rightEyeHull = cv2.convexHull(rightEye)
             cv2.drawContours(frame, [leftEyeHull], -1, (0, 255, 0), 1)
             cv2.drawContours(frame, [rightEyeHull], -1, (0, 255, 0), 1)
             
-            # Check for drowsiness
+            # Drowsiness detection based on EAR
             if ear < EAR_THRESHOLD:
                 flag += 1
                 if flag >= frame_check:
@@ -280,12 +328,20 @@ try:
             else:
                 flag = 0
             
-            # Display EAR value
+            # Display metrics
             cv2.putText(frame, f"EAR: {ear:.2f}", (300, 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            cv2.putText(frame, f"FPS: {current_fps:.1f}", (300, 60),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         
-        # Show frame
-        cv2.imshow("Drowsiness Detection", frame)
+        # Display frame (skip if we're falling behind)
+        if current_fps < 5:  # Emergency frame skip if performance is very poor
+            skip_display = frame_times[-1] % 2 == 0  # Skip every other frame
+        else:
+            skip_display = False
+        
+        if not skip_display:
+            cv2.imshow("Drowsiness Detection", frame)
         
         # Read sensors
         # DHT11 Reading
@@ -321,7 +377,9 @@ try:
             break
         
         # Small delay to prevent excessive CPU usage
-        time.sleep(0.01)
+        elapsed = time.time() - loop_start
+        if elapsed < 1/30:  # Cap at 30 FPS maximum
+            time.sleep(1/30 - elapsed)
 
 except KeyboardInterrupt:
     print("\nProgram interrupted by user")
