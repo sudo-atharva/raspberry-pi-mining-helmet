@@ -7,7 +7,8 @@ import platform
 import importlib
 import serial
 import time
-from collections import deque  # For FPS calculation
+import threading
+from collections import deque
 from datetime import datetime
 import math
 import os
@@ -18,13 +19,21 @@ try:
     import Adafruit_DHT
 except ImportError:
     Adafruit_DHT = None
-    print("Warning: Adafruit_DHT not installed. DHT11 sensor will be disabled.")
 
 try:
     from smbus2 import SMBus
 except ImportError:
     SMBus = None
-    print("Warning: smbus2 not installed. MPU6050 sensor will be disabled.")
+
+# Global variables for sensor data
+sensor_data = {
+    'temperature': -1,
+    'humidity': -1,
+    'accel_x': -1, 'accel_y': -1, 'accel_z': -1,
+    'gyro_x': -1, 'gyro_y': -1, 'gyro_z': -1,
+    'lat': -1, 'lon': -1
+}
+sensor_lock = threading.Lock()
 
 # --- Drowsiness Detection Setup ---
 def eye_aspect_ratio(eye):
@@ -34,17 +43,6 @@ def eye_aspect_ratio(eye):
     C = distance.euclidean(eye[0], eye[3])
     ear = (A + B) / (2.0 * C)
     return ear
-
-def try_open_uart(port):
-    """Try to open UART port with error handling"""
-    if os.path.exists(port):
-        try:
-            return serial.Serial(port, baudrate=9600, timeout=1)
-        except Exception as e:
-            print(f"Warning: Could not open UART port {port}: {e}")
-    else:
-        print(f"Warning: UART port {port} not found.")
-    return None
 
 def check_face_landmarks_file():
     """Check if face landmarks file exists"""
@@ -61,9 +59,9 @@ if not check_face_landmarks_file():
     sys.exit(1)
 
 # Initialize drowsiness detection variables
-EAR_THRESHOLD = 0.25  # Eye aspect ratio threshold - FIXED: was using undefined 'thresh'
-frame_check = 20
-flag = 0
+EAR_THRESHOLD = 0.25
+FRAME_CHECK = 10  # Reduced from 20 for faster response
+FACE_DETECT_INTERVAL = 3  # Detect faces every 3 frames instead of every frame
 
 # Initialize face detection
 detect = dlib.get_frontal_face_detector()
@@ -75,29 +73,25 @@ predict = dlib.shape_predictor("models/shape_predictor_68_face_landmarks.dat")
 picam2 = None
 cap = None
 
-# --- Robust Camera Selection: USB webcam or PiCamera2 ---
-def get_fps(frame_times, n=30):
-    """Calculate FPS from a deque of frame timestamps"""
-    if len(frame_times) < 2:
-        return 0
-    return len(frame_times)/(frame_times[-1] - frame_times[0])
-
+# --- Camera Setup ---
 def initialize_camera():
-    """Initialize camera with fallback options"""
+    """Initialize camera with performance optimizations"""
     global cap, picam2
     
     # Try USB webcam first
     try:
         cap = cv2.VideoCapture(0)
         if cap.isOpened():
-            # Set optimized camera parameters
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            # Aggressive optimization for performance
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)  # Lower resolution
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
             cap.set(cv2.CAP_PROP_FPS, 30)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce buffer lag
+            
             # Test camera
             ret, frame = cap.read()
             if ret and frame is not None:
-                print("Using USB webcam via OpenCV.")
+                print("Using USB webcam")
                 return True
             else:
                 cap.release()
@@ -113,304 +107,271 @@ def initialize_camera():
             if picamera2_spec is not None:
                 from picamera2 import Picamera2
                 picam2 = Picamera2()
-                # Optimize PiCamera2 settings for performance
+                # Optimized for speed
                 picam2.configure(picam2.create_preview_configuration(
-                    main={"format": 'RGB888',  # Direct RGB format
-                          "size": (640, 480)},
-                    controls={"FrameRate": 30,
-                             "AwbEnable": 0,  # Disable auto white balance
-                             "AeEnable": 1,   # Keep auto exposure
-                             "NoiseReductionMode": 0}  # Minimal noise reduction
+                    main={"format": 'RGB888', "size": (320, 240)},
+                    controls={"FrameRate": 30, "AwbEnable": 0, "AeEnable": 1, "NoiseReductionMode": 0}
                 ))
                 picam2.start()
-                print("Using PiCamera2.")
+                print("Using PiCamera2")
                 return True
-            else:
-                print("PiCamera2 not available.")
         except Exception as e:
-            print(f"Error initializing PiCamera2: {e}")
-            picam2 = None
+            print(f"PiCamera2 error: {e}")
     
-    print("No camera found: neither USB webcam nor PiCamera2 available.")
     return False
 
-# Initialize camera
-if not initialize_camera():
-    print("Error: No camera available. Exiting.")
-    sys.exit(1)
-
-# --- DHT11 Setup ---
-if Adafruit_DHT:
+# --- Sensor Thread Functions ---
+def dht_thread():
+    """Background thread for DHT11 sensor"""
+    if not Adafruit_DHT:
+        return
+    
     DHT_SENSOR = Adafruit_DHT.DHT11
-    DHT_PIN = 4  # GPIO pin
-    print("DHT11 sensor initialized on GPIO pin 4")
-else:
-    DHT_SENSOR = None
-    DHT_PIN = None
-
-# --- MPU6050 Setup ---
-bus = None
-if SMBus:
-    try:
-        MPU6050_ADDR = 0x68
-        bus = SMBus(1)
-        bus.write_byte_data(MPU6050_ADDR, 0x6B, 0)  # Wake up MPU6050
-        print("MPU6050 sensor initialized")
-    except Exception as e:
-        print(f"Error initializing MPU6050: {e}")
-        bus = None
-
-def read_mpu6050():
-    """Read MPU6050 sensor data"""
-    if bus is None:
-        return -1, -1, -1, -1, -1, -1
+    DHT_PIN = 4
     
-    try:
-        def read_word(reg):
-            h = bus.read_byte_data(MPU6050_ADDR, reg)
-            l = bus.read_byte_data(MPU6050_ADDR, reg+1)
-            val = (h << 8) + l
-            if val >= 0x8000:
-                val = -((65535 - val) + 1)
-            return val
-        
-        accel_x = read_word(0x3B) / 16384.0
-        accel_y = read_word(0x3D) / 16384.0
-        accel_z = read_word(0x3F) / 16384.0
-        gyro_x = read_word(0x43) / 131.0
-        gyro_y = read_word(0x45) / 131.0
-        gyro_z = read_word(0x47) / 131.0
-        return accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z
-    except Exception as e:
-        print(f"Error reading MPU6050: {e}")
-        return -1, -1, -1, -1, -1, -1
-
-# --- GPS Setup (NEO-6M) ---
-def try_open_gps(port):
-    """Initialize GPS module"""
-    if os.path.exists(port):
-        try:
-            gps_serial = serial.Serial(port, baudrate=9600, timeout=1)
-            print(f"GPS module initialized on {port}")
-            
-            def read_gps():
-                try:
-                    line = gps_serial.readline().decode('ascii', errors='replace')
-                    if line.startswith('$GPGGA'):
-                        parts = line.split(',')
-                        if len(parts) > 5 and parts[2] and parts[4]:
-                            # Convert from DDMM.MMMM format to decimal degrees
-                            lat_raw = float(parts[2])
-                            lat = int(lat_raw/100) + (lat_raw % 100)/60
-                            if parts[3] == 'S':
-                                lat = -lat
-                            
-                            lon_raw = float(parts[4])
-                            lon = int(lon_raw/100) + (lon_raw % 100)/60
-                            if parts[5] == 'W':
-                                lon = -lon
-                            
-                            return lat, lon
-                except Exception as e:
-                    print(f"GPS read error: {e}")
-                return None, None
-            
-            return gps_serial, read_gps
-        except Exception as e:
-            print(f"Warning: Could not open GPS port {port}: {e}")
-    else:
-        print(f"Warning: GPS port {port} not found.")
-    
-    def read_gps():
-        return None, None
-    return None, read_gps
-
-# Initialize GPS
-gps_serial, read_gps = try_open_gps('/dev/ttyS0')
-
-# --- UART Setup (HC-12) ---
-uart = try_open_uart('/dev/ttyUSB0')
-if uart:
-    print("UART communication initialized")
-
-print("Starting drowsiness detection system...")
-print("Press 'q' to quit")
-
-# Initialize performance monitoring
-frame_times = deque(maxlen=30)  # Store last 30 frame timestamps
-last_fps_print = time.time()
-fps_print_interval = 5  # Print FPS every 5 seconds
-
-# Initialize face detection ROI
-roi_scale = 0.5 # Dynamic ROI scaling
-min_roi_scale = 0.3  # Minimum ROI scale
-max_roi_scale = 1.0  # Maximum ROI scale
-target_fps = 15  # Target FPS
-
-# Main loop
-try:
     while True:
-        loop_start = time.time()
-        
-        # Camera frame capture
-        frame = None
-        ret = False
-        
-        if cap is not None:
-            ret, frame = cap.read()
-        elif picam2 is not None:
-            try:
-                frame = picam2.capture_array()
-                if frame is not None:
-                    if frame.shape[-1] == 4:  # Only convert if 4 channels
-                        frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
-                    ret = True
-            except Exception as e:
-                print(f"PiCamera2 capture error: {e}")
-                ret = False
-        
-        if not ret or frame is None:
-            print("Failed to capture frame. Retrying...")
-            time.sleep(0.1)
-            continue
-        
-        # Dynamic frame resizing based on performance
-        frame = imutils.resize(frame, width=int(640 * roi_scale))
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        
-        # Performance monitoring
-        frame_times.append(loop_start)
-        current_fps = get_fps(frame_times)
-        
-        # Adjust ROI scale based on FPS
-        if current_fps < target_fps - 2 and roi_scale > min_roi_scale:
-            roi_scale = max(roi_scale * 0.95, min_roi_scale)
-        elif current_fps > target_fps + 2 and roi_scale < max_roi_scale:
-            roi_scale = min(roi_scale * 1.05, max_roi_scale)
-        
-        # Print FPS periodically
-        if time.time() - last_fps_print > fps_print_interval:
-            print(f"FPS: {current_fps:.1f}, ROI Scale: {roi_scale:.2f}")
-            last_fps_print = time.time()
-        
-        # Face detection with ROI optimization
-        subjects = detect(gray, 0)  # 0 = Don't upsample image
-        print(f"[DEBUG] Faces detected: {len(subjects)}")
-        drowsy = 0
-        
-        for subject in subjects:
-            shape = predict(gray, subject)
-            shape = face_utils.shape_to_np(shape)
-            
-            # Extract and process eye regions
-            leftEye = shape[lStart:lEnd]
-            rightEye = shape[rStart:rEnd]
-            
-            # Calculate eye aspect ratios (EAR)
-            leftEAR = eye_aspect_ratio(leftEye)
-            rightEAR = eye_aspect_ratio(rightEye)
-            ear = (leftEAR + rightEAR) / 2.0
-            print(f"[DEBUG] EAR: left={leftEAR:.2f}, right={rightEAR:.2f}, avg={ear:.2f}")
-            
-            # Visualize eye detection
-            leftEyeHull = cv2.convexHull(leftEye)
-            rightEyeHull = cv2.convexHull(rightEye)
-            cv2.drawContours(frame, [leftEyeHull], -1, (0, 255, 0), 1)
-            cv2.drawContours(frame, [rightEyeHull], -1, (0, 255, 0), 1)
-            
-            # Drowsiness detection based on EAR
-            if ear < EAR_THRESHOLD:
-                flag += 1
-                print(f"[DEBUG] Drowsy frame count: {flag}")
-                if flag >= frame_check:
-                    cv2.putText(frame, "****************ALERT!****************", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                    cv2.putText(frame, "****************ALERT!****************", (10, 325),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                    drowsy = 1
-            else:
-                flag = 0
-            
-            # Display metrics
-            cv2.putText(frame, f"EAR: {ear:.2f}", (300, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(frame, f"FPS: {current_fps:.1f}", (300, 60),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        
-        # Display frame (skip if we're falling behind)
-        if current_fps < 5:  # Emergency frame skip if performance is very poor
-            skip_display = frame_times[-1] % 2 == 0  # Skip every other frame
-        else:
-            skip_display = False
-        
-        if not skip_display:
-            cv2.imshow("Drowsiness Detection", frame)
-        
-        # Read sensors
-        # DHT11 Reading
-        if Adafruit_DHT and DHT_SENSOR and DHT_PIN is not None:
-            humidity, temperature = Adafruit_DHT.read_retry(DHT_SENSOR, DHT_PIN)
-            if humidity is None or temperature is None:
-                humidity, temperature = -1, -1
-        else:
-            humidity, temperature = -1, -1
-        
-        # MPU6050 Reading
-        accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z = read_mpu6050()
-        
-        # GPS Reading
-        lat, lon = read_gps()
-        if lat is None or lon is None:
-            lat, lon = -1, -1
-        
-        # Prepare data string
-        data = f"DROWSY:{drowsy},TEMP:{temperature:.1f},HUM:{humidity:.1f},ACC:({accel_x:.2f},{accel_y:.2f},{accel_z:.2f}),GYRO:({gyro_x:.2f},{gyro_y:.2f},{gyro_z:.2f}),GPS:({lat},{lon})\n"
-        print(data.strip())
-        
-        # Send data via UART (HC-12)
-        if uart:
-            try:
-                uart.write(data.encode())
-            except Exception as e:
-                print(f"UART send error: {e}")
-        
-        # Check for exit key
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord("q"):
-            break
-        
-        # Small delay to prevent excessive CPU usage
-        elapsed = time.time() - loop_start
-        if elapsed < 1/30:  # Cap at 30 FPS maximum
-            time.sleep(1/30 - elapsed)
-
-except KeyboardInterrupt:
-    print("\nProgram interrupted by user")
-except Exception as e:
-    print(f"Unexpected error: {e}")
-
-finally:
-    # --- Cleanup ---
-    print("Cleaning up...")
-    
-    if 'gps_serial' in locals() and gps_serial:
-        gps_serial.close()
-    
-    if bus is not None:
-        bus.close()
-    
-    cv2.destroyAllWindows()
-    
-    if cap is not None:
-        cap.release()
-    
-    if picam2 is not None:
         try:
-            picam2.close()
+            humidity, temperature = Adafruit_DHT.read_retry(DHT_SENSOR, DHT_PIN)
+            with sensor_lock:
+                sensor_data['temperature'] = temperature if temperature else -1
+                sensor_data['humidity'] = humidity if humidity else -1
         except Exception:
             pass
+        time.sleep(2)  # Read every 2 seconds
+
+def mpu6050_thread():
+    """Background thread for MPU6050 sensor"""
+    if not SMBus:
+        return
     
-    if uart:
-        uart.close()
+    try:
+        bus = SMBus(1)
+        bus.write_byte_data(0x68, 0x6B, 0)  # Wake up MPU6050
+        
+        def read_word(reg):
+            h = bus.read_byte_data(0x68, reg)
+            l = bus.read_byte_data(0x68, reg+1)
+            val = (h << 8) + l
+            return val - 65536 if val >= 0x8000 else val
+        
+        while True:
+            try:
+                accel_x = read_word(0x3B) / 16384.0
+                accel_y = read_word(0x3D) / 16384.0
+                accel_z = read_word(0x3F) / 16384.0
+                gyro_x = read_word(0x43) / 131.0
+                gyro_y = read_word(0x45) / 131.0
+                gyro_z = read_word(0x47) / 131.0
+                
+                with sensor_lock:
+                    sensor_data.update({
+                        'accel_x': accel_x, 'accel_y': accel_y, 'accel_z': accel_z,
+                        'gyro_x': gyro_x, 'gyro_y': gyro_y, 'gyro_z': gyro_z
+                    })
+            except Exception:
+                pass
+            time.sleep(0.1)  # Read every 100ms
+    except Exception:
+        pass
+
+def gps_thread():
+    """Background thread for GPS data"""
+    if not os.path.exists('/dev/ttyS0'):
+        return
     
-    print("Cleanup complete. Goodbye!")
+    try:
+        gps_serial = serial.Serial('/dev/ttyS0', baudrate=9600, timeout=1)
+        
+        while True:
+            try:
+                line = gps_serial.readline().decode('ascii', errors='replace')
+                if line.startswith('$GPGGA'):
+                    parts = line.split(',')
+                    if len(parts) > 5 and parts[2] and parts[4]:
+                        lat_raw = float(parts[2])
+                        lat = int(lat_raw/100) + (lat_raw % 100)/60
+                        if parts[3] == 'S':
+                            lat = -lat
+                        
+                        lon_raw = float(parts[4])
+                        lon = int(lon_raw/100) + (lon_raw % 100)/60
+                        if parts[5] == 'W':
+                            lon = -lon
+                        
+                        with sensor_lock:
+                            sensor_data['lat'] = lat
+                            sensor_data['lon'] = lon
+            except Exception:
+                pass
+            time.sleep(1)  # Read every second
+    except Exception:
+        pass
+
+# --- Main Application ---
+def main():
+    if not initialize_camera():
+        print("Error: No camera available")
+        sys.exit(1)
+    
+    # Start sensor threads
+    if Adafruit_DHT:
+        threading.Thread(target=dht_thread, daemon=True).start()
+    if SMBus:
+        threading.Thread(target=mpu6050_thread, daemon=True).start()
+    threading.Thread(target=gps_thread, daemon=True).start()
+    
+    # Initialize UART
+    uart = None
+    if os.path.exists('/dev/ttyUSB0'):
+        try:
+            uart = serial.Serial('/dev/ttyUSB0', baudrate=9600, timeout=0.1)
+            print("UART initialized")
+        except Exception as e:
+            print(f"UART error: {e}")
+    
+    # Performance monitoring
+    frame_times = deque(maxlen=10)
+    last_status_print = time.time()
+    
+    # Face detection optimization
+    flag = 0
+    frame_count = 0
+    last_faces = []
+    face_regions = []
+    
+    print("Starting optimized drowsiness detection...")
+    
+    try:
+        while True:
+            loop_start = time.time()
+            
+            # Capture frame
+            frame = None
+            if cap:
+                ret, frame = cap.read()
+                if not ret:
+                    continue
+            elif picam2:
+                try:
+                    frame = picam2.capture_array()
+                    if frame.shape[-1] == 4:
+                        frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+                except Exception:
+                    continue
+            
+            if frame is None:
+                continue
+            
+            # Resize for processing - very small for speed
+            small_frame = imutils.resize(frame, width=160)
+            gray = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
+            
+            # Performance tracking
+            frame_times.append(loop_start)
+            current_fps = len(frame_times) / (frame_times[-1] - frame_times[0]) if len(frame_times) > 1 else 0
+            
+            drowsy = 0
+            
+            # Face detection - only every nth frame
+            if frame_count % FACE_DETECT_INTERVAL == 0:
+                faces = detect(gray, 0)
+                if faces:
+                    last_faces = faces
+                    # Scale face regions back to original frame size
+                    scale_factor = frame.shape[1] / small_frame.shape[1]
+                    face_regions = [(int(face.left() * scale_factor), 
+                                   int(face.top() * scale_factor),
+                                   int(face.right() * scale_factor), 
+                                   int(face.bottom() * scale_factor)) for face in faces]
+                elif not last_faces:
+                    face_regions = []
+            
+            # Process faces if detected
+            if last_faces and face_regions:
+                # Use original frame for landmark detection
+                gray_full = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                
+                for i, face in enumerate(last_faces):
+                    # Scale face coordinates for landmark detection
+                    scale_factor = frame.shape[1] / small_frame.shape[1]
+                    scaled_face = dlib.rectangle(
+                        int(face.left() * scale_factor),
+                        int(face.top() * scale_factor),
+                        int(face.right() * scale_factor),
+                        int(face.bottom() * scale_factor)
+                    )
+                    
+                    shape = predict(gray_full, scaled_face)
+                    shape = face_utils.shape_to_np(shape)
+                    
+                    leftEye = shape[lStart:lEnd]
+                    rightEye = shape[rStart:rEnd]
+                    
+                    leftEAR = eye_aspect_ratio(leftEye)
+                    rightEAR = eye_aspect_ratio(rightEye)
+                    ear = (leftEAR + rightEAR) / 2.0
+                    
+                    # Draw eye contours
+                    leftEyeHull = cv2.convexHull(leftEye)
+                    rightEyeHull = cv2.convexHull(rightEye)
+                    cv2.drawContours(frame, [leftEyeHull], -1, (0, 255, 0), 1)
+                    cv2.drawContours(frame, [rightEyeHull], -1, (0, 255, 0), 1)
+                    
+                    # Drowsiness detection
+                    if ear < EAR_THRESHOLD:
+                        flag += 1
+                        if flag >= FRAME_CHECK:
+                            cv2.putText(frame, "DROWSY ALERT!", (10, 30),
+                                      cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                            drowsy = 1
+                    else:
+                        flag = 0
+                    
+                    # Display info
+                    cv2.putText(frame, f"EAR: {ear:.2f}", (10, 60),
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                    break  # Process only first face for performance
+            
+            # Display FPS
+            cv2.putText(frame, f"FPS: {current_fps:.1f}", (10, 90),
+                      cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            
+            # Show frame
+            cv2.imshow("Drowsiness Detection", frame)
+            
+            # Send data via UART (non-blocking)
+            if uart and frame_count % 10 == 0:  # Send every 10th frame
+                try:
+                    with sensor_lock:
+                        data = f"DROWSY:{drowsy},TEMP:{sensor_data['temperature']:.1f},HUM:{sensor_data['humidity']:.1f},ACC:({sensor_data['accel_x']:.2f},{sensor_data['accel_y']:.2f},{sensor_data['accel_z']:.2f}),GYRO:({sensor_data['gyro_x']:.2f},{sensor_data['gyro_y']:.2f},{sensor_data['gyro_z']:.2f}),GPS:({sensor_data['lat']},{sensor_data['lon']})\n"
+                    uart.write(data.encode())
+                except Exception:
+                    pass
+            
+            # Print status occasionally
+            if time.time() - last_status_print > 5:
+                print(f"FPS: {current_fps:.1f}, Drowsy: {drowsy}")
+                last_status_print = time.time()
+            
+            frame_count += 1
+            
+            # Check for quit
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+    
+    except KeyboardInterrupt:
+        print("\nStopping...")
+    
+    finally:
+        # Cleanup
+        if cap:
+            cap.release()
+        if picam2:
+            picam2.close()
+        if uart:
+            uart.close()
+        cv2.destroyAllWindows()
+        print("Cleanup complete")
+
+if __name__ == "__main__":
+    main()
