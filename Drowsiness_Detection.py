@@ -242,7 +242,7 @@ last_fps_print = time.time()
 fps_print_interval = 5  # Print FPS every 5 seconds
 
 # Initialize face detection ROI
-roi_scale = 1.0  # Dynamic ROI scaling
+roi_scale = 0.5 # Dynamic ROI scaling
 min_roi_scale = 0.3  # Minimum ROI scale
 max_roi_scale = 1.0  # Maximum ROI scale
 target_fps = 15  # Target FPS
@@ -295,6 +295,7 @@ try:
         
         # Face detection with ROI optimization
         subjects = detect(gray, 0)  # 0 = Don't upsample image
+        print(f"[DEBUG] Faces detected: {len(subjects)}")
         drowsy = 0
         
         for subject in subjects:
@@ -309,6 +310,7 @@ try:
             leftEAR = eye_aspect_ratio(leftEye)
             rightEAR = eye_aspect_ratio(rightEye)
             ear = (leftEAR + rightEAR) / 2.0
+            print(f"[DEBUG] EAR: left={leftEAR:.2f}, right={rightEAR:.2f}, avg={ear:.2f}")
             
             # Visualize eye detection
             leftEyeHull = cv2.convexHull(leftEye)
@@ -319,6 +321,7 @@ try:
             # Drowsiness detection based on EAR
             if ear < EAR_THRESHOLD:
                 flag += 1
+                print(f"[DEBUG] Drowsy frame count: {flag}")
                 if flag >= frame_check:
                     cv2.putText(frame, "****************ALERT!****************", (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
