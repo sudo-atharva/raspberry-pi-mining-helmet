@@ -32,7 +32,7 @@ This project is a conceptual design for a smart safety helmet for mining workers
 
 - **Raspberry Pi 4 (4GB RAM recommended)**
 - **USB webcam or Pi Camera (Picamera2)**
-- **DHT11 sensor** (GPIO 4 for data)
+- **DHT22 sensor** (GPIO 4 for data)
 - **MPU6050** (I2C)
 - **NEO-6M GPS** (UART, /dev/ttyS0)
 - **HC-12 UART module** (UART, /dev/ttyUSB0)
@@ -44,7 +44,7 @@ This project is a conceptual design for a smart safety helmet for mining workers
 
 ### 2. GPIO Pinout & Significance
 
-- **GPIO 4:** DHT11 data pin (environmental sensing)
+- **GPIO 4:** DHT22 data pin (environmental sensing)
 - **GPIO 17:** Button input for gyro calibration (worker can reset helmet orientation)
 - **GPIO 27:** LED output (lights up when helmet is tilted/camera is active)
 - **GPIO 22:** MQ gas sensor alert output (buzzer/LED for hazardous gas)
@@ -155,7 +155,8 @@ Where p1–p6 are the eye landmark points (see image below). The numerator sums 
 
 ### Sensor Integration: Data Acquisition and Fusion
 
-#### DHT11 (Temperature & Humidity)
+
+#### DHT22 (Temperature & Humidity)
 
 - Connected to a GPIO pin (default: GPIO 4).
 - The Adafruit_DHT library is used to read temperature (°C) and humidity (%).

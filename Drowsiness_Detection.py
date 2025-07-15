@@ -193,11 +193,11 @@ COLLAPSE_ALERT = False
 
 # --- Sensor Thread Functions ---
 def dht_thread():
-    """Background thread for DHT11 sensor"""
+    """Background thread for DHT22 sensor"""
     if not Adafruit_DHT:
         return
     
-    DHT_SENSOR = Adafruit_DHT.DHT11
+    DHT_SENSOR = Adafruit_DHT.DHT22
     DHT_PIN = 4
     
     while True:
@@ -288,55 +288,63 @@ def main():
     # Start sensor threads
     if Adafruit_DHT:
         threading.Thread(target=dht_thread, daemon=True).start()
-    if SMBus:
-        threading.Thread(target=mpu6050_thread, daemon=True).start()
-    threading.Thread(target=gps_thread, daemon=True).start()
 
-    # Initialize UART
-    uart = None
-    if os.path.exists('/dev/ttyUSB0'):
-        try:
-            uart = serial.Serial('/dev/ttyUSB0', baudrate=9600, timeout=0.1)
-            print("UART initialized")
-        except Exception as e:
-            print(f"UART error: {e}")
 
-    # Performance monitoring
-    frame_times = deque(maxlen=10)
-    last_status_print = time.time()
+    # Automatic gyro calibration on startup
+    calibrate_gyro()
+    print("Gyro automatically calibrated on startup.")
 
-    # Face detection optimization
-    flag = 0
-    frame_count = 0
-    last_faces = []
-    face_regions = []
+    # Wiggling detection parameters
+    WIGGLE_THRESHOLD = 30  # degrees/sec change to consider as wiggling
+    WIGGLE_WINDOW = 2      # seconds to monitor for wiggling
+    WIGGLE_COUNT = 5       # number of wiggles to trigger camera
 
-    print("Starting optimized drowsiness detection...")
+    wiggle_events = []
+    last_gyro = {'x': 0, 'y': 0, 'z': 0}
+    camera_active = False
 
     try:
         while True:
             loop_start = time.time()
 
-            # --- Gyro Calibration Button ---
+            # --- Gyro Calibration Button or Terminal ---
             if GPIO.input(BUTTON_PIN) == GPIO.LOW:
                 calibrate_gyro()
-                time.sleep(0.5)  # Debounce
+                time.sleep(0.5)
 
-            # --- Tilt Detection ---
+            # Check for terminal input (non-blocking)
+            import select
+            if sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
+                cmd = sys.stdin.readline().strip()
+                if cmd.lower() == "calibrate":
+                    calibrate_gyro()
+                    print("Gyro calibrated via terminal command!")
+
+            # --- Wiggling Detection ---
             with sensor_lock:
                 gx = sensor_data['gyro_x'] - gyro_zero['x']
                 gy = sensor_data['gyro_y'] - gyro_zero['y']
                 gz = sensor_data['gyro_z'] - gyro_zero['z']
-            tilt = max(abs(gx), abs(gy), abs(gz))
-            if tilt > 90:
-                if tilt_start_time is None:
-                    tilt_start_time = time.time()
-                elif time.time() - tilt_start_time > 5:
-                    CAMERA_ACTIVE = True
-                    GPIO.output(LED_PIN, GPIO.HIGH)
+
+            # Calculate change in gyro
+            delta_x = abs(gx - last_gyro['x'])
+            delta_y = abs(gy - last_gyro['y'])
+            delta_z = abs(gz - last_gyro['z'])
+            last_gyro = {'x': gx, 'y': gy, 'z': gz}
+
+            # If rapid change, record wiggle event
+            if delta_x > WIGGLE_THRESHOLD or delta_y > WIGGLE_THRESHOLD or delta_z > WIGGLE_THRESHOLD:
+                wiggle_events.append(loop_start)
+
+            # Remove old wiggle events
+            wiggle_events = [t for t in wiggle_events if loop_start - t < WIGGLE_WINDOW]
+
+            # If enough wiggles, activate camera
+            if len(wiggle_events) >= WIGGLE_COUNT:
+                camera_active = True
+                GPIO.output(LED_PIN, GPIO.HIGH)
             else:
-                tilt_start_time = None
-                CAMERA_ACTIVE = False
+                camera_active = False
                 GPIO.output(LED_PIN, GPIO.LOW)
 
             # --- MQ Gas Sensor Detection ---
@@ -350,9 +358,8 @@ def main():
             else:
                 GPIO.output(MQ_ALERT_PIN, GPIO.LOW)
 
-            # --- Camera and Detection Only When Tilted ---
-            if CAMERA_ACTIVE:
-                # ...existing code...
+            # --- Camera and Detection Only When Wiggling ---
+            if camera_active:
                 frame = None
                 if cap:
                     ret, frame = cap.read()
@@ -369,33 +376,24 @@ def main():
                 if frame is None:
                     continue
 
-                # ...existing code...
                 small_frame = imutils.resize(frame, width=160)
                 gray = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
 
-                # ...existing code...
-                frame_times.append(loop_start)
-                current_fps = len(frame_times) / (frame_times[-1] - frame_times[0]) if len(frame_times) > 1 else 0
-
                 drowsy = 0
+                faces = detect(gray, 0)
+                if faces:
+                    last_faces = faces
+                    scale_factor = frame.shape[1] / small_frame.shape[1]
+                    face_regions = [(int(face.left() * scale_factor), 
+                                   int(face.top() * scale_factor),
+                                   int(face.right() * scale_factor), 
+                                   int(face.bottom() * scale_factor)) for face in faces]
+                else:
+                    face_regions = []
 
-                # ...existing code...
-                if frame_count % FACE_DETECT_INTERVAL == 0:
-                    faces = detect(gray, 0)
-                    if faces:
-                        last_faces = faces
-                        scale_factor = frame.shape[1] / small_frame.shape[1]
-                        face_regions = [(int(face.left() * scale_factor), 
-                                       int(face.top() * scale_factor),
-                                       int(face.right() * scale_factor), 
-                                       int(face.bottom() * scale_factor)) for face in faces]
-                    elif not last_faces:
-                        face_regions = []
-
-                # ...existing code...
+                # Process faces if detected
                 if last_faces and face_regions:
                     gray_full = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
                     for i, face in enumerate(last_faces):
                         scale_factor = frame.shape[1] / small_frame.shape[1]
                         scaled_face = dlib.rectangle(
@@ -404,22 +402,17 @@ def main():
                             int(face.right() * scale_factor),
                             int(face.bottom() * scale_factor)
                         )
-
                         shape = predict(gray_full, scaled_face)
                         shape = face_utils.shape_to_np(shape)
-
                         leftEye = shape[lStart:lEnd]
                         rightEye = shape[rStart:rEnd]
-
                         leftEAR = eye_aspect_ratio(leftEye)
                         rightEAR = eye_aspect_ratio(rightEye)
                         ear = (leftEAR + rightEAR) / 2.0
-
                         leftEyeHull = cv2.convexHull(leftEye)
                         rightEyeHull = cv2.convexHull(rightEye)
                         cv2.drawContours(frame, [leftEyeHull], -1, (0, 255, 0), 1)
                         cv2.drawContours(frame, [rightEyeHull], -1, (0, 255, 0), 1)
-
                         if ear < EAR_THRESHOLD:
                             flag += 1
                             if flag >= FRAME_CHECK:
@@ -428,45 +421,45 @@ def main():
                                 drowsy = 1
                         else:
                             flag = 0
-
                         cv2.putText(frame, f"EAR: {ear:.2f}", (10, 60),
                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
                         break
 
-                # ...existing code...
-                if not last_faces or not face_regions:
+                # If no face or drowsy, send alert
+                if not last_faces or not face_regions or drowsy:
                     COLLAPSE_ALERT = True
                     if uart:
                         with sensor_lock:
-                            data = f"COLLAPSED,GPS:({sensor_data['lat']},{sensor_data['lon']})\n"
+                            data = f"COLLAPSED,GPS:({sensor_data['lat']},{sensor_data['lon']}),TEMP:{sensor_data['temperature']},HUM:{sensor_data['humidity']},GAS:{harmful_gas if harmful_gas else 'NONE'}\n"
                         uart.write(data.encode())
                 else:
                     COLLAPSE_ALERT = False
 
-                cv2.putText(frame, f"FPS: {current_fps:.1f}", (10, 90),
-                          cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-
                 cv2.imshow("Drowsiness Detection", frame)
 
-                if uart and frame_count % 10 == 0:
-                    try:
-                        with sensor_lock:
-                            if COLLAPSE_ALERT:
-                                data = f"COLLAPSED,GPS:({sensor_data['lat']},{sensor_data['lon']})\n"
-                            else:
-                                data = f"DROWSY:{drowsy},TEMP:{sensor_data['temperature']:.1f},HUM:{sensor_data['humidity']:.1f},ACC:({sensor_data['accel_x']:.2f},{sensor_data['accel_y']:.2f},{sensor_data['accel_z']:.2f}),GYRO:({sensor_data['gyro_x']:.2f},{sensor_data['gyro_y']:.2f},{sensor_data['gyro_z']:.2f}),GPS:({sensor_data['lat']},{sensor_data['lon']})\n"
-                        uart.write(data.encode())
-                    except Exception:
-                        pass
+            # If not wiggling, do nothing (just monitor sensors)
 
-                if time.time() - last_status_print > 5:
-                    print(f"FPS: {current_fps:.1f}, Drowsy: {drowsy}")
-                    last_status_print = time.time()
+            frame_count += 1
 
-            # ...existing code...
-            else:
-                if uart and frame_count % 10 == 0:
-                    with sensor_lock:
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+
+    except KeyboardInterrupt:
+        print("\nStopping...")
+
+    finally:
+        GPIO.cleanup()
+        if cap:
+            cap.release()
+        if picam2:
+            picam2.close()
+        if uart:
+            uart.close()
+        cv2.destroyAllWindows()
+        print("Cleanup complete")
+
+if __name__ == "__main__":
+    main()
                         data = f"TEMP:{sensor_data['temperature']:.1f},HUM:{sensor_data['humidity']:.1f},ACC:({sensor_data['accel_x']:.2f},{sensor_data['accel_y']:.2f},{sensor_data['accel_z']:.2f}),GYRO:({sensor_data['gyro_x']:.2f},{sensor_data['gyro_y']:.2f},{sensor_data['gyro_z']:.2f}),GPS:({sensor_data['lat']},{sensor_data['lon']})\n"
                     uart.write(data.encode())
 
