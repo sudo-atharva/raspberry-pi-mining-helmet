@@ -13,55 +13,16 @@ from datetime import datetime
 import math
 import os
 import sys
+import select
 import RPi.GPIO as GPIO
+import psutil
+import gc
+
 # Optional imports for MQ gas sensor and MCP3008
 try:
     import spidev
 except ImportError:
     spidev = None
-
-# MQ gas sensor configuration
-MQ_CHANNEL = 0  # MCP3008 channel for MQ sensor
-MQ_ALERT_PIN = 22  # GPIO pin for miner alert
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(MQ_ALERT_PIN, GPIO.OUT)
-GPIO.output(MQ_ALERT_PIN, GPIO.LOW)
-
-# Define supported gases and thresholds (example values)
-MQ_GASES = {
-    'LPG': {'threshold': 300, 'type': 'LPG'},
-    'CO': {'threshold': 250, 'type': 'CO'},
-    'CH4': {'threshold': 350, 'type': 'Methane'},
-}
-
-# Helper to read MCP3008 channel
-def read_mcp3008(channel):
-    if not spidev:
-        return -1
-    spi = spidev.SpiDev()
-    try:
-        spi.open(0, 0)
-        spi.max_speed_hz = 1350000
-        cmd = [1, (8 + channel) << 4, 0]
-        r = spi.xfer2(cmd)
-        value = ((r[1] & 3) << 8) + r[2]
-        spi.close()
-        return value
-    except Exception:
-        spi.close()
-        return -1
-
-# Detect harmful gas
-def detect_gas():
-    value = read_mcp3008(MQ_CHANNEL)
-    detected = None
-    percent = 0
-    for gas, info in MQ_GASES.items():
-        if value >= info['threshold']:
-            detected = info['type']
-            percent = min(100, int((value / 1023) * 100))
-            break
-    return detected, percent, value
 
 # Optional imports with error handling
 try:
@@ -74,6 +35,64 @@ try:
 except ImportError:
     SMBus = None
 
+# Configuration flags for sensors (set to True when you get the hardware)
+ENABLE_HC12 = False  # Set to True when you get HC-12 module
+ENABLE_MQ_SENSOR = False  # Set to True when you get MQ sensor
+ENABLE_DHT22 = False  # Set to True if you have DHT22 sensor
+ENABLE_GPS = False  # Set to True if you have GPS module
+
+# GPIO Setup
+GPIO.setmode(GPIO.BCM)
+
+# MQ gas sensor configuration (for future use)
+if ENABLE_MQ_SENSOR:
+    MQ_CHANNEL = 0  # MCP3008 channel for MQ sensor
+    MQ_ALERT_PIN = 22  # GPIO pin for miner alert
+    GPIO.setup(MQ_ALERT_PIN, GPIO.OUT)
+    GPIO.output(MQ_ALERT_PIN, GPIO.LOW)
+
+# Define supported gases and thresholds (example values)
+MQ_GASES = {
+    'LPG': {'threshold': 300, 'type': 'LPG'},
+    'CO': {'threshold': 250, 'type': 'CO'},
+    'CH4': {'threshold': 350, 'type': 'Methane'},
+}
+
+# Helper to read MCP3008 channel
+def read_mcp3008(channel):
+    if not spidev or not ENABLE_MQ_SENSOR:
+        return -1
+    spi = spidev.SpiDev()
+    try:
+        spi.open(0, 0)
+        spi.max_speed_hz = 1350000
+        cmd = [1, (8 + channel) << 4, 0]
+        r = spi.xfer2(cmd)
+        value = ((r[1] & 3) << 8) + r[2]
+        spi.close()
+        return value
+    except Exception:
+        try:
+            spi.close()
+        except:
+            pass
+        return -1
+
+# Detect harmful gas
+def detect_gas():
+    if not ENABLE_MQ_SENSOR:
+        return None, 0, 0
+    
+    value = read_mcp3008(MQ_CHANNEL)
+    detected = None
+    percent = 0
+    for gas, info in MQ_GASES.items():
+        if value >= info['threshold']:
+            detected = info['type']
+            percent = min(100, int((value / 1023) * 100))
+            break
+    return detected, percent, value
+
 # Global variables for sensor data
 sensor_data = {
     'temperature': -1,
@@ -83,6 +102,14 @@ sensor_data = {
     'lat': -1, 'lon': -1
 }
 sensor_lock = threading.Lock()
+
+# Performance monitoring
+performance_stats = {
+    'frame_count': 0,
+    'processing_time': 0,
+    'last_fps_check': time.time(),
+    'fps': 0
+}
 
 # --- Drowsiness Detection Setup ---
 def eye_aspect_ratio(eye):
@@ -109,8 +136,8 @@ if not check_face_landmarks_file():
 
 # Initialize drowsiness detection variables
 EAR_THRESHOLD = 0.25
-FRAME_CHECK = 10  # Reduced from 20 for faster response
-FACE_DETECT_INTERVAL = 3  # Detect faces every 3 frames instead of every frame
+FRAME_CHECK = 8  # Reduced for faster response
+FACE_DETECT_INTERVAL = 2  # Detect faces every 2 frames for better performance
 
 # Initialize face detection
 detect = dlib.get_frontal_face_detector()
@@ -122,9 +149,9 @@ predict = dlib.shape_predictor("models/shape_predictor_68_face_landmarks.dat")
 picam2 = None
 cap = None
 
-# --- Camera Setup ---
+# --- Camera Setup with Performance Optimizations ---
 def initialize_camera():
-    """Initialize camera with performance optimizations"""
+    """Initialize camera with aggressive performance optimizations"""
     global cap, picam2
     
     # Try USB webcam first
@@ -132,10 +159,11 @@ def initialize_camera():
         cap = cv2.VideoCapture(0)
         if cap.isOpened():
             # Aggressive optimization for performance
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)  # Lower resolution
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
-            cap.set(cv2.CAP_PROP_FPS, 30)
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce buffer lag
+            cap.set(cv2.CAP_PROP_FPS, 15)  # Reduced FPS for stability
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)  # Faster exposure
             
             # Test camera
             ret, frame = cap.read()
@@ -156,12 +184,21 @@ def initialize_camera():
             if picamera2_spec is not None:
                 from picamera2 import Picamera2
                 picam2 = Picamera2()
-                # Optimized for speed
-                picam2.configure(picam2.create_preview_configuration(
+                # Optimized config for stable performance
+                config = picam2.create_preview_configuration(
                     main={"format": 'RGB888', "size": (320, 240)},
-                    controls={"FrameRate": 30, "AwbEnable": 0, "AeEnable": 1, "NoiseReductionMode": 0}
-                ))
+                    controls={
+                        "FrameRate": 15,  # Reduced for stability
+                        "AwbEnable": 0,
+                        "AeEnable": 1,
+                        "NoiseReductionMode": 0,
+                        "Brightness": 0.1,
+                        "Contrast": 1.0
+                    }
+                )
+                picam2.configure(config)
                 picam2.start()
+                time.sleep(2)  # Camera warm-up time
                 print("Using PiCamera2")
                 return True
         except Exception as e:
@@ -172,7 +209,6 @@ def initialize_camera():
 # --- GPIO Setup ---
 BUTTON_PIN = 17  # Physical button for gyro calibration
 LED_PIN = 27     # LED indicator
-GPIO.setmode(GPIO.BCM)
 GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 GPIO.setup(LED_PIN, GPIO.OUT)
 GPIO.output(LED_PIN, GPIO.LOW)
@@ -194,7 +230,7 @@ COLLAPSE_ALERT = False
 # --- Sensor Thread Functions ---
 def dht_thread():
     """Background thread for DHT22 sensor"""
-    if not Adafruit_DHT:
+    if not Adafruit_DHT or not ENABLE_DHT22:
         return
     
     DHT_SENSOR = Adafruit_DHT.DHT22
@@ -208,7 +244,7 @@ def dht_thread():
                 sensor_data['humidity'] = humidity if humidity else -1
         except Exception:
             pass
-        time.sleep(2)  # Read every 2 seconds
+        time.sleep(3)  # Read every 3 seconds to reduce CPU load
 
 def mpu6050_thread():
     """Background thread for MPU6050 sensor"""
@@ -241,13 +277,13 @@ def mpu6050_thread():
                     })
             except Exception:
                 pass
-            time.sleep(0.1)  # Read every 100ms
+            time.sleep(0.05)  # Read every 50ms for better responsiveness
     except Exception:
         pass
 
 def gps_thread():
     """Background thread for GPS data"""
-    if not os.path.exists('/dev/ttyS0'):
+    if not ENABLE_GPS or not os.path.exists('/dev/ttyS0'):
         return
     
     try:
@@ -278,42 +314,116 @@ def gps_thread():
     except Exception:
         pass
 
+# --- Initialize HC-12 Communication ---
+def initialize_hc12():
+    """Initialize HC-12 communication (for future use)"""
+    if not ENABLE_HC12:
+        return None
+    
+    try:
+        # Try different serial ports for HC-12
+        for port in ['/dev/ttyAMA0', '/dev/ttyS0', '/dev/ttyUSB0']:
+            try:
+                hc12 = serial.Serial(port, 9600, timeout=1)
+                print(f"HC-12 initialized on {port}")
+                return hc12
+            except:
+                continue
+        print("HC-12 initialization failed: No available ports")
+        return None
+    except Exception as e:
+        print(f"HC-12 initialization failed: {e}")
+        return None
+
+def send_data_hc12(hc12, data):
+    """Send data via HC-12"""
+    if hc12 and ENABLE_HC12:
+        try:
+            hc12.write(data.encode())
+            hc12.flush()
+        except Exception as e:
+            print(f"HC-12 send error: {e}")
+
+# --- Performance monitoring ---
+def update_performance_stats():
+    """Update performance statistics"""
+    current_time = time.time()
+    performance_stats['frame_count'] += 1
+    
+    if current_time - performance_stats['last_fps_check'] >= 5.0:  # Every 5 seconds
+        fps = performance_stats['frame_count'] / (current_time - performance_stats['last_fps_check'])
+        performance_stats['fps'] = fps
+        performance_stats['frame_count'] = 0
+        performance_stats['last_fps_check'] = current_time
+        
+        # Memory usage
+        memory_percent = psutil.virtual_memory().percent
+        cpu_percent = psutil.cpu_percent()
+        
+        print(f"Performance: FPS={fps:.1f}, CPU={cpu_percent:.1f}%, Memory={memory_percent:.1f}%")
+        
+        # Force garbage collection if memory usage is high
+        if memory_percent > 80:
+            gc.collect()
 
 # --- Main Application ---
 def main():
+    global COLLAPSE_ALERT
+    
     if not initialize_camera():
         print("Error: No camera available")
         sys.exit(1)
 
-    # Start sensor threads
-    if Adafruit_DHT:
-        threading.Thread(target=dht_thread, daemon=True).start()
+    # Initialize HC-12 (will be None if not enabled)
+    hc12 = initialize_hc12()
 
+    # Start sensor threads
+    if ENABLE_DHT22 and Adafruit_DHT:
+        threading.Thread(target=dht_thread, daemon=True).start()
+    
+    if SMBus:
+        threading.Thread(target=mpu6050_thread, daemon=True).start()
+    
+    if ENABLE_GPS:
+        threading.Thread(target=gps_thread, daemon=True).start()
 
     # Automatic gyro calibration on startup
+    time.sleep(1)  # Wait for sensor data
     calibrate_gyro()
     print("Gyro automatically calibrated on startup.")
 
+    # Initialize variables
+    flag = 0
+    frame_count = 0
+    last_faces = []
+    last_detection_time = 0
+
     # Wiggling detection parameters
-    WIGGLE_THRESHOLD = 30  # degrees/sec change to consider as wiggling
+    WIGGLE_THRESHOLD = 25  # Reduced threshold for better detection
     WIGGLE_WINDOW = 2      # seconds to monitor for wiggling
-    WIGGLE_COUNT = 5       # number of wiggles to trigger camera
+    WIGGLE_COUNT = 3       # Reduced count for faster activation
 
     wiggle_events = []
     last_gyro = {'x': 0, 'y': 0, 'z': 0}
     camera_active = False
 
+    # Face detection optimization
+    face_detection_skip = 0
+    cached_faces = []
+
+    print("System ready. Camera will activate on head wiggling.")
+    print("Press 'q' to quit, type 'calibrate' + Enter to recalibrate gyro")
+
     try:
         while True:
             loop_start = time.time()
 
-            # --- Gyro Calibration Button or Terminal ---
+            # --- Gyro Calibration Button ---
             if GPIO.input(BUTTON_PIN) == GPIO.LOW:
                 calibrate_gyro()
                 time.sleep(0.5)
 
             # Check for terminal input (non-blocking)
-            import select
             if sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
                 cmd = sys.stdin.readline().strip()
                 if cmd.lower() == "calibrate":
@@ -339,39 +449,45 @@ def main():
             # Remove old wiggle events
             wiggle_events = [t for t in wiggle_events if loop_start - t < WIGGLE_WINDOW]
 
-            # If enough wiggles, activate camera
-            if len(wiggle_events) >= WIGGLE_COUNT:
+            # Camera activates on wiggle, deactivates if eyes detected and not drowsy
+            if len(wiggle_events) >= WIGGLE_COUNT and not camera_active:
+                print("Camera activated by wiggling")
                 camera_active = True
                 GPIO.output(LED_PIN, GPIO.HIGH)
-            else:
-                camera_active = False
-                GPIO.output(LED_PIN, GPIO.LOW)
 
-            # --- MQ Gas Sensor Detection ---
-            harmful_gas, gas_percent, raw_value = detect_gas()
-            if harmful_gas:
-                GPIO.output(MQ_ALERT_PIN, GPIO.HIGH)
-                if uart:
-                    with sensor_lock:
-                        data = f"GAS:{harmful_gas},PERCENT:{gas_percent},RAW:{raw_value},GPS:({sensor_data['lat']},{sensor_data['lon']})\n"
-                    uart.write(data.encode())
-            else:
-                GPIO.output(MQ_ALERT_PIN, GPIO.LOW)
 
-            # --- Camera and Detection Only When Wiggling ---
+            # --- Gas Sensor Detection (Future feature) ---
+            if ENABLE_MQ_SENSOR:
+                harmful_gas, gas_percent, raw_value = detect_gas()
+                if harmful_gas:
+                    GPIO.output(MQ_ALERT_PIN, GPIO.HIGH)
+                    if hc12:
+                        with sensor_lock:
+                            data = f"GAS:{harmful_gas},PERCENT:{gas_percent},RAW:{raw_value},GPS:({sensor_data['lat']},{sensor_data['lon']})\n"
+                        send_data_hc12(hc12, data)
+                else:
+                    GPIO.output(MQ_ALERT_PIN, GPIO.LOW)
+
+            # --- Camera Processing Only When Active ---
             if camera_active:
                 frame = None
-                if cap:
-                    ret, frame = cap.read()
-                    if not ret:
-                        continue
-                elif picam2:
-                    try:
+                try:
+                    if cap:
+                        ret, frame = cap.read()
+                        if not ret:
+                            print("Camera read failed, reinitializing...")
+                            cap.release()
+                            time.sleep(1)
+                            initialize_camera()
+                            continue
+                    elif picam2:
                         frame = picam2.capture_array()
                         if frame.shape[-1] == 4:
                             frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
-                    except Exception:
-                        continue
+                except Exception as e:
+                    print(f"Camera error: {e}")
+                    time.sleep(0.1)
+                    continue
 
                 if frame is None:
                     continue
@@ -380,21 +496,23 @@ def main():
                 gray = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
 
                 drowsy = 0
-                faces = detect(gray, 0)
-                if faces:
-                    last_faces = faces
-                    scale_factor = frame.shape[1] / small_frame.shape[1]
-                    face_regions = [(int(face.left() * scale_factor), 
-                                   int(face.top() * scale_factor),
-                                   int(face.right() * scale_factor), 
-                                   int(face.bottom() * scale_factor)) for face in faces]
+                face_found = False
+
+                # Skip face detection on some frames for performance
+                if face_detection_skip <= 0:
+                    faces = detect(gray, 0)
+                    if faces:
+                        cached_faces = faces
+                    face_detection_skip = FACE_DETECT_INTERVAL
                 else:
-                    face_regions = []
+                    faces = cached_faces
+                    face_detection_skip -= 1
 
                 # Process faces if detected
-                if last_faces and face_regions:
+                if faces:
+                    face_found = True
                     gray_full = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                    for i, face in enumerate(last_faces):
+                    for face in faces:
                         scale_factor = frame.shape[1] / small_frame.shape[1]
                         scaled_face = dlib.rectangle(
                             int(face.left() * scale_factor),
@@ -413,6 +531,7 @@ def main():
                         rightEyeHull = cv2.convexHull(rightEye)
                         cv2.drawContours(frame, [leftEyeHull], -1, (0, 255, 0), 1)
                         cv2.drawContours(frame, [rightEyeHull], -1, (0, 255, 0), 1)
+                        # Check for drowsiness
                         if ear < EAR_THRESHOLD:
                             flag += 1
                             if flag >= FRAME_CHECK:
@@ -425,24 +544,43 @@ def main():
                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
                         break
 
-                # If no face or drowsy, send alert
-                if not last_faces or not face_regions or drowsy:
+                # Alert logic
+                if not face_found or drowsy:
                     COLLAPSE_ALERT = True
-                    if uart:
-                        with sensor_lock:
-                            data = f"COLLAPSED,GPS:({sensor_data['lat']},{sensor_data['lon']}),TEMP:{sensor_data['temperature']},HUM:{sensor_data['humidity']},GAS:{harmful_gas if harmful_gas else 'NONE'}\n"
-                        uart.write(data.encode())
+                    current_time = time.time()
+                    if current_time - last_detection_time > 5:  # Send alert every 5 seconds
+                        if hc12:
+                            with sensor_lock:
+                                alert_type = "DROWSY" if drowsy else "NO_FACE"
+                                data = f"{alert_type},GPS:({sensor_data['lat']},{sensor_data['lon']}),TEMP:{sensor_data['temperature']:.1f},HUM:{sensor_data['humidity']:.1f}\n"
+                            send_data_hc12(hc12, data)
+                        last_detection_time = current_time
                 else:
                     COLLAPSE_ALERT = False
+                    # Eyes detected and not drowsy: deactivate camera until next wiggle
+                    print("Camera deactivated: eyes detected and not drowsy")
+                    camera_active = False
+                    GPIO.output(LED_PIN, GPIO.LOW)
 
-                cv2.imshow("Drowsiness Detection", frame)
+                cv2.imshow("Mining Helmet Safety System", frame)
 
-            # If not wiggling, do nothing (just monitor sensors)
+            # Send regular sensor data (less frequently)
+            if frame_count % 30 == 0 and hc12:  # Every 30 frames
+                with sensor_lock:
+                    data = f"SENSORS,TEMP:{sensor_data['temperature']:.1f},HUM:{sensor_data['humidity']:.1f},ACC:({sensor_data['accel_x']:.2f},{sensor_data['accel_y']:.2f},{sensor_data['accel_z']:.2f}),GYRO:({sensor_data['gyro_x']:.2f},{sensor_data['gyro_y']:.2f},{sensor_data['gyro_z']:.2f}),GPS:({sensor_data['lat']},{sensor_data['lon']})\n"
+                send_data_hc12(hc12, data)
 
             frame_count += 1
+            update_performance_stats()
 
+            # Check for quit
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
+
+            # Maintain reasonable frame rate
+            loop_time = time.time() - loop_start
+            if loop_time < 0.066:  # ~15 FPS
+                time.sleep(0.066 - loop_time)
 
     except KeyboardInterrupt:
         print("\nStopping...")
@@ -453,32 +591,8 @@ def main():
             cap.release()
         if picam2:
             picam2.close()
-        if uart:
-            uart.close()
-        cv2.destroyAllWindows()
-        print("Cleanup complete")
-
-if __name__ == "__main__":
-    main()
-                        data = f"TEMP:{sensor_data['temperature']:.1f},HUM:{sensor_data['humidity']:.1f},ACC:({sensor_data['accel_x']:.2f},{sensor_data['accel_y']:.2f},{sensor_data['accel_z']:.2f}),GYRO:({sensor_data['gyro_x']:.2f},{sensor_data['gyro_y']:.2f},{sensor_data['gyro_z']:.2f}),GPS:({sensor_data['lat']},{sensor_data['lon']})\n"
-                    uart.write(data.encode())
-
-            frame_count += 1
-
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-
-    except KeyboardInterrupt:
-        print("\nStopping...")
-
-    finally:
-        GPIO.cleanup()
-        if cap:
-            cap.release()
-        if picam2:
-            picam2.close()
-        if uart:
-            uart.close()
+        if hc12:
+            hc12.close()
         cv2.destroyAllWindows()
         print("Cleanup complete")
 
