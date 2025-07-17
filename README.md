@@ -34,98 +34,104 @@ This project is a conceptual design for a smart safety helmet for mining workers
 - **USB webcam or Pi Camera (Picamera2)**
 - **DHT22 sensor** (GPIO 4 for data)
 - **MPU6050** (I2C)
-- **NEO-6M GPS** (UART, /dev/ttyS0)
-- **HC-12 UART module** (UART, /dev/ttyUSB0)
-- **Button for Gyro Calibration** (GPIO 17)
-- **LED Indicator** (GPIO 27)
-- **MQ Gas Sensor** (Analog input via ADC or digital pin, e.g., GPIO 22 for alert)
 
+# Mining Helmet Safety System
 
+## Overview
 
-### 2. GPIO Pinout & Significance
+This project implements a robust, modular safety system for mining helmets using a Raspberry Pi 4. The system integrates drowsiness detection, head movement (wiggle) detection, environmental sensing, GPS location tracking, and wireless alerting. It is designed for reliability, real-time responsiveness, and professional deployment in safety-critical environments.
 
-- **GPIO 4:** DHT22 data pin (environmental sensing)
-- **GPIO 17:** Button input for gyro calibration (worker can reset helmet orientation)
-- **GPIO 27:** LED output (lights up when helmet is tilted/camera is active)
-- **GPIO 22:** MQ gas sensor alert output (buzzer/LED for hazardous gas)
+## Features
 
-### 3. Software Setup
+- **Drowsiness Detection:** Uses OpenCV, dlib, and facial landmarks to monitor eye aspect ratio (EAR) and detect drowsiness. If drowsiness is detected, a buzzer is activated and alerts are sent.
+- **Head Wiggle Detection:** Monitors MPU6050 gyroscope for rapid head movements. Camera and LED are activated upon sufficient wiggling.
+- **Environmental Sensing:** Reads temperature and humidity from DHT22, and detects harmful gases (LPG, CO, CH4) using MQ sensor via MCP3008 ADC. Gas alerts are sent wirelessly.
+- **GPS Location Tracking:** Acquires real-time location using NEO-6M GPS or compatible modules.
+- **Wireless Alerting:** Sends alerts and sensor data via HC-12 UART wireless module.
+- **Buzzer Alert:** Activates buzzer (GPIO 23) when drowsiness is detected for immediate physical feedback.
+- **Modular Sensor Test Scripts:** Individual scripts for hardware validation and troubleshooting.
+- **Automatic Camera Selection:** Supports both USB webcams and PiCamera2, with optimized settings for performance.
+- **Robust Error Handling:** All hardware interfaces and threads are protected against runtime errors.
+- **Resource Cleanup:** Ensures all GPIO and hardware resources are safely released on exit or error.
 
+## Hardware Requirements
 
-Install dependencies (for both USB webcam and Pi Camera support):
+- Raspberry Pi 4 (recommended)
+- DHT22 sensor (temperature/humidity)
+- MPU6050 sensor (accelerometer/gyroscope)
+- MQ gas sensor (LPG/CO/CH4) + MCP3008 ADC
+- NEO-6M GPS module (or compatible)
+- HC-12 UART wireless module
+- USB webcam or PiCamera2
+- LED indicator
+- Physical button (for gyro calibration)
+- Buzzer (for drowsiness alert)
 
-```sh
-sudo apt-get update
-sudo apt-get install python3-opencv python3-picamera2 python3-pip libgpiod2
-pip3 install imutils dlib scipy pyserial smbus2 Adafruit_DHT picamera2
-```
+## Wiring and GPIO Pinout
 
-If using a Raspberry Pi camera, ensure the camera interface is enabled in `raspi-config`.
+| Component      | GPIO Pin | Notes                       |
+|---------------|----------|-----------------------------|
+| DHT22         | 4        | Data pin                    |
+| MPU6050       | I2C      | SDA/SCL (hardware I2C)      |
+| MQ Gas Alert  | 22       | Output pin for gas alert    |
+| LED           | 27       | Output pin for status       |
+| Button        | 17       | Input pin for calibration   |
+| Buzzer        | 23       | Output pin for drowsiness   |
 
+## Software Architecture
 
-### 4. Running the Code
+- **Language & Libraries:** Python 3, OpenCV, dlib, imutils, RPi.GPIO, smbus2, serial, psutil, gc, Adafruit_DHT, spidev
+- **Modular Classes:** Each sensor and subsystem is encapsulated in a dedicated class for maintainability and extensibility.
+- **Multi-threaded Sensor Polling:** Ensures real-time responsiveness and non-blocking operation.
+- **Main Loop:** Coordinates sensor fusion, camera activation, drowsiness detection, and alerting.
+- **Performance Monitoring:** Tracks FPS, processing time, and memory usage for long-term stability.
+- **Error Handling:** All hardware and threads are protected against runtime errors, with safe resource cleanup.
 
+## System Operation
 
-```sh
+1. **Startup:** Initializes all sensors, camera, and communication modules. Gyroscope is automatically calibrated.
+2. **Wiggling Detection:** Rapid head movements detected by MPU6050 activate the camera and LED.
+3. **Drowsiness Detection:** Camera processes frames for facial landmarks. If eyes are closed (EAR below threshold for several frames), drowsiness is detected and buzzer is activated.
+4. **Alerting:**
+    - **Drowsiness Detected:** Buzzer activates, GPS coordinates and sensor data are sent via HC-12.
+    - **No Face Detected:** Buzzer deactivates, alert sent via HC-12.
+    - **Eyes Detected & Not Drowsy:** Camera and buzzer deactivate until next wiggle.
+5. **Environmental Sensing:** MQ gas sensor triggers alert and sends data if harmful gas detected.
+6. **User Interaction:** Physical button or terminal command recalibrates gyro. 'q' or 'quit' exits system.
+7. **Cleanup:** All hardware and resources are safely released on exit or error.
+
+## Example Usage
+
+```bash
 python3 Drowsiness_Detection.py
 ```
 
-The script will automatically use a USB webcam if available, or fall back to Pi Camera (Picamera2) if running on a Raspberry Pi and no webcam is detected.
+## Code Structure
 
-The script will start the webcam, perform drowsiness detection, and attempt to read all sensors. If a sensor is not aconnected, its value will be reported as -1. All data is sent via UART (HC-12) in a single line per frame.
+- `Drowsiness_Detection.py`: Main system logic and modular classes for sensors, camera, drowsiness detection, and communication.
+- `gps_check.py`, `dht11_check.py`, `mpu6050_check.py`, `mq_check.py`: Individual sensor test scripts for hardware validation.
+- `models/shape_predictor_68_face_landmarks.dat`: Required for facial landmark detection (download from dlib.net).
+- `assets/`: Example images and resources.
 
----
+## Professional Implementation Notes
 
+- All hardware interfaces are robustly error-handled for field reliability and safety.
+- GPIO pins are initialized and cleaned up to prevent hardware lockups and ensure safe operation.
+- Modular class design enables easy extension, maintenance, and future upgrades.
+- Performance monitoring and memory management are included for long-term stability in harsh environments.
+- Buzzer integration provides immediate physical feedback for drowsiness, enhancing safety.
+- System is suitable for real-world mining helmet deployment and can be adapted for other safety-critical applications.
 
-## System Details & Significance
+## Extending the System
 
-### Why is this needed?
+- Add support for additional sensors (e.g., air quality, vibration, light).
+- Integrate cloud-based alerting, remote monitoring, and data logging.
+- Expand user interface for configuration, diagnostics, and reporting.
+- Add wiring diagrams, PCB layouts, and enclosure designs for manufacturing.
 
-Mining and exploration are high-risk activities. Workers may collapse due to exhaustion, injury, or hazardous conditions. Traditional helmets do not provide real-time monitoring or emergency alerts. This system:
+## License
 
-- Detects drowsiness and collapse using computer vision and motion sensors
-- Sends immediate alerts and GPS coordinates to rescue teams
-- Monitors environmental conditions (temperature, humidity)
-- Reduces false alarms by only activating camera when needed
-- Saves battery and processing by running camera and LED only when helmet is tilted
-
-
-### How does it work?
-
-- The helmet constantly monitors orientation using the MPU6050 gyro/accelerometer.
-- If the helmet is upright, only sensor data is sent via HC-12 UART.
-- If the helmet is tilted >90° for >5 seconds, the camera and LED activate, and face/drowsiness detection starts using OpenCV and dlib facial landmarks (EAR method).
-- If no face is detected, a collapse alert and GPS coordinates are sent repeatedly via HC-12.
-- If a harmful gas is detected by the MQ sensor (via MCP3008 ADC), GPIO 22 is set high to alert the miner and a message with gas type, percentage, and GPS coordinates is sent via HC-12.
-- The worker can recalibrate the helmet orientation at any time using the button (GPIO 17).
-- All sensor threads run in the background, and the main loop fuses data and sends it via UART.
-
-### Future Improvements
-
-- Add heart rate and SpO2 sensors for health monitoring
-- Integrate LoRa or cellular for long-range communication
-- Add vibration motor for haptic alerts
-- Use AI for more robust activity/fall detection
-- Solar or battery management for longer runtime
-- Cloud dashboard for remote monitoring and analytics
-
-### Conceptual Design Note
-
-This project is a conceptual prototype. It demonstrates how sensor fusion, computer vision, and IoT can be combined for real-world safety applications in mining and exploration. The design can be adapted for other hazardous environments (construction, firefighting, etc).
-
-#### 1. Facial Landmark Detection
-
-The system uses dlib's pre-trained 68-point facial landmark detector. For each detected face, the model predicts 68 (x, y) coordinates corresponding to facial features. The left and right eyes are extracted using the following indices:
-
-- Left eye: points 42–47
-- Right eye: points 36–41
-
-#### 2. Eye Aspect Ratio (EAR)
-
-The EAR is a single scalar value that reflects the degree of eye openness. It is calculated as:
-
-    EAR = (||p2-p6|| + ||p3-p5||) / (2 * ||p1-p4||)
-
+See LICENSE.txt for details.
 Where p1–p6 are the eye landmark points (see image below). The numerator sums the distances between the vertical eye landmarks, and the denominator is the distance between the horizontal eye landmarks.
 
 <img src="assets/eye1.jpg">
