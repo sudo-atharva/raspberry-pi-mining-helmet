@@ -1,8 +1,16 @@
+
+# Raspberry Pi (Helmet/Worker)
 opencv-python
 imutils
 dlib
-scipy
-pyserial
-smbus2
+numpy
+psutil
 Adafruit_DHT
-picamera2
+smbus2
+RPi.GPIO
+spidev
+pyserial
+
+# Boss GUI (Laptop)
+pyserial
+# tkinter is included with Python standard library

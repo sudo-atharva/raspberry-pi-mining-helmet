@@ -62,8 +62,8 @@ class Config:
     # Hardware enable flags
     ENABLE_HC12 = False
     ENABLE_MQ_SENSOR = False
-    ENABLE_DHT22 = False
-    ENABLE_GPS = False
+    ENABLE_DHT22 = True
+    ENABLE_GPS = True
     ENABLE_MPU6050 = True
     
     # GPIO Pins
@@ -90,6 +90,9 @@ class Config:
     WIGGLE_THRESHOLD = 20
     WIGGLE_WINDOW = 2.0
     WIGGLE_COUNT = 3
+
+    # Camera active duration (seconds)
+    CAMERA_ACTIVE_DURATION = 30
     
     # Performance
     TARGET_FPS = 15
@@ -626,6 +629,9 @@ class HelmetSafetySystem:
         self.camera_active = False
         self.running = False
         self.last_alert_time = 0
+
+        # Camera activation timer
+        self.camera_activated_time = None
         
         # Wiggle detection
         self.wiggle_events = deque(maxlen=50)
@@ -638,6 +644,32 @@ class HelmetSafetySystem:
         
         # Initialize GPIO
         self.setup_gpio()
+
+        # CSV log file
+        self.csv_log_path = "helmet_log.csv"
+        self._init_csv_log()
+
+    def _init_csv_log(self):
+        import os
+        import csv
+        if not os.path.exists(self.csv_log_path):
+            with open(self.csv_log_path, "w", newline="") as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow(["timestamp", "event", "status", "gps", "temp", "hum"])
+
+    def log_event(self, event, status=None):
+        import csv
+        data = self.sensor_data.get_data()
+        gps = f"({data['lat']:.6f},{data['lon']:.6f})"
+        temp = data.get('temperature', '-')
+        hum = data.get('humidity', '-')
+        t = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        try:
+            with open(self.csv_log_path, "a", newline="") as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow([t, event, status if status else "-", gps, temp, hum])
+        except Exception as e:
+            print(f"CSV log error: {e}")
     
     def setup_gpio(self):
         """Setup GPIO pins"""
@@ -713,45 +745,65 @@ class HelmetSafetySystem:
         return len(self.wiggle_events) >= Config.WIGGLE_COUNT
     
     def activate_camera(self):
-        """Activate camera and LED"""
+        """Activate camera and LED, and set timer"""
         if not self.camera_active:
             self.camera_active = True
+            self.camera_activated_time = time.time()
             if GPIO_AVAILABLE:
                 GPIO.output(Config.LED_PIN, GPIO.HIGH)
             print("Camera activated by wiggling")
+            self.log_event("CAMERA_ACTIVATED")
     
     def deactivate_camera(self):
-        """Deactivate camera and LED"""
+        """Deactivate camera and LED, reset timer, close camera window"""
         if self.camera_active:
             self.camera_active = False
+            self.camera_activated_time = None
             if GPIO_AVAILABLE:
                 GPIO.output(Config.LED_PIN, GPIO.LOW)
+            try:
+                cv2.destroyWindow("Mining Helmet Safety System")
+            except Exception:
+                pass
             print("Camera deactivated")
+            self.log_event("CAMERA_DEACTIVATED")
     
     def activate_buzzer(self, state):
-        """Control buzzer"""
+        """Control buzzer with full power using PWM if available, else digital"""
         if GPIO_AVAILABLE:
-            GPIO.output(Config.BUZZER_PIN, GPIO.HIGH if state else GPIO.LOW)
+            try:
+                if not hasattr(self, '_buzzer_pwm'):
+                    self._buzzer_pwm = GPIO.PWM(Config.BUZZER_PIN, 2000)  # 2kHz
+                    self._buzzer_pwm_started = False
+                if state:
+                    if not self._buzzer_pwm_started:
+                        self._buzzer_pwm.start(100)  # 100% duty cycle
+                        self._buzzer_pwm_started = True
+                    else:
+                        self._buzzer_pwm.ChangeDutyCycle(100)
+                else:
+                    if self._buzzer_pwm_started:
+                        self._buzzer_pwm.ChangeDutyCycle(0)
+            except Exception:
+                # fallback to digital
+                GPIO.output(Config.BUZZER_PIN, GPIO.HIGH if state else GPIO.LOW)
     
     def send_alert(self, alert_type, additional_data=None):
-        """Send alert via HC-12"""
+        """Send alert via HC-12 and log to CSV"""
         current_time = time.time()
         if current_time - self.last_alert_time < 5:  # Rate limiting
             return
-        
         data = self.sensor_data.get_data()
         message = (f"{alert_type},GPS:({data['lat']:.6f},{data['lon']:.6f}),"
                   f"TEMP:{data['temperature']:.1f},HUM:{data['humidity']:.1f},"
                   f"TIME:{datetime.now().strftime('%H:%M:%S')}")
-        
         if additional_data:
             message += f",{additional_data}"
-        
         message += "\n"
-        
         if self.hc12.send_data(message):
             self.last_alert_time = current_time
             print(f"Alert sent: {alert_type}")
+            self.log_event("ALERT_SENT", alert_type)
     
     def handle_user_input(self):
         """Handle user input (non-blocking)"""
@@ -773,56 +825,62 @@ class HelmetSafetySystem:
         """Main system loop"""
         if not self.initialize():
             return
-        
+
         self.running = True
         print("System ready. Wiggle head to activate camera.")
         print("Press 'q' to quit, 'calibrate' to recalibrate gyro")
-        
+
         try:
             while self.running:
                 loop_start = time.time()
-                
+
                 # Handle user input
                 self.handle_user_input()
-                
+
                 # Check for wiggle detection
                 if self.detect_wiggle() and not self.camera_active:
                     self.activate_camera()
-                
-                # Process camera if active
+
+                # If camera is active, check if duration has passed
                 if self.camera_active:
-                    frame = self.camera_manager.read_frame()
-                    if frame is not None:
-                        face_detected, drowsy, processed_frame = self.drowsiness_detector.detect_drowsiness(frame)
-                        
-                        if drowsy:
-                            self.activate_buzzer(True)
-                            self.send_alert("DROWSY")
-                        elif not face_detected:
-                            self.activate_buzzer(False)
-                            self.send_alert("NO_FACE")
-                        else:
-                            # Face detected and not drowsy - deactivate camera
-                            self.activate_buzzer(False)
-                            self.deactivate_camera()
-                        
-                        cv2.imshow("Mining Helmet Safety System", processed_frame)
-                        
-                        if cv2.waitKey(1) & 0xFF == ord('q'):
-                            self.running = False
-                
+                    # If time exceeded, deactivate camera
+                    if self.camera_activated_time and (time.time() - self.camera_activated_time > Config.CAMERA_ACTIVE_DURATION):
+                        self.deactivate_camera()
+                        self.activate_buzzer(False)
+                    else:
+                        frame = self.camera_manager.read_frame()
+                        if frame is not None:
+                            face_detected, drowsy, processed_frame = self.drowsiness_detector.detect_drowsiness(frame)
+
+                            if drowsy:
+                                self.activate_buzzer(True)
+                                self.send_alert("DROWSY")
+                                self.log_event("DROWSINESS_DETECTED", "DROWSY")
+                            elif not face_detected:
+                                self.activate_buzzer(False)
+                                self.send_alert("NO_FACE")
+                                self.log_event("NO_FACE_DETECTED", "NO_FACE")
+                            else:
+                                # Face detected and not drowsy - keep camera on
+                                self.activate_buzzer(False)
+
+                            cv2.imshow("Mining Helmet Safety System", processed_frame)
+
+                            if cv2.waitKey(1) & 0xFF == ord('q'):
+                                self.running = False
+
                 # Update performance monitoring
                 processing_time = time.time() - loop_start
                 self.performance_monitor.update(processing_time)
-                
+
                 # Maintain target FPS
                 target_loop_time = 1.0 / Config.TARGET_FPS
                 if processing_time < target_loop_time:
                     time.sleep(target_loop_time - processing_time)
-        
+
         except KeyboardInterrupt:
             print("\nStopping system...")
-        
+
         finally:
             self.cleanup()
     
