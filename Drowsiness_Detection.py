@@ -287,17 +287,17 @@ class DHT22Sensor:
             self.thread.join(timeout=1)
     
     def _sensor_loop(self):
-        """Main DHT22 reading loop"""
+        """Main DHT22 reading loop with debug prints"""
         while self.running:
             try:
                 humidity, temperature = Adafruit_DHT.read_retry(
                     Adafruit_DHT.DHT22, Config.DHT_PIN, delay_seconds=0.1
                 )
+                print(f"[DHT22] Read: Temp={temperature}, Hum={humidity}")
                 if humidity is not None and temperature is not None:
                     self.sensor_data.update(temperature=temperature, humidity=humidity)
             except Exception as e:
                 print(f"DHT22 read error: {e}")
-            
             time.sleep(Config.DHT_UPDATE_INTERVAL)
 
 class GPSSensor:
@@ -658,7 +658,10 @@ class HelmetSafetySystem:
             try:
                 with open(self.csv_log_path, "w", newline="") as csvfile:
                     writer = csv.writer(csvfile)
-                    writer.writerow(["timestamp", "event", "status", "gps", "temp", "hum"])
+                    writer.writerow([
+                        "timestamp", "event", "status", "gps", "temp", "hum",
+                        "accel_x", "accel_y", "accel_z", "gyro_x", "gyro_y", "gyro_z"
+                    ])
                 print(f"CSV log created at {self.csv_log_path}")
             except Exception as e:
                 print(f"CSV log creation error: {e}")
@@ -668,11 +671,23 @@ class HelmetSafetySystem:
         gps = f"({data['lat']:.6f},{data['lon']:.6f})"
         temp = data.get('temperature', '-')
         hum = data.get('humidity', '-')
+        # If temp/hum is -1 or None, log as 'N/A'
+        temp = 'N/A' if temp is None or (isinstance(temp, (int, float)) and temp == -1) else temp
+        hum = 'N/A' if hum is None or (isinstance(hum, (int, float)) and hum == -1) else hum
+        accel_x = data.get('accel_x', '-')
+        accel_y = data.get('accel_y', '-')
+        accel_z = data.get('accel_z', '-')
+        gyro_x = data.get('gyro_x', '-')
+        gyro_y = data.get('gyro_y', '-')
+        gyro_z = data.get('gyro_z', '-')
         t = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         try:
             with open(self.csv_log_path, "a", newline="") as csvfile:
                 writer = csv.writer(csvfile)
-                writer.writerow([t, event, status if status else "-", gps, temp, hum])
+                writer.writerow([
+                    t, event, status if status else "-", gps, temp, hum,
+                    accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z
+                ])
             print(f"Logged event: {event}, status: {status}")
         except Exception as e:
             print(f"CSV log error: {e}")
