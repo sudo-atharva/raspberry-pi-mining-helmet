@@ -92,11 +92,7 @@ class Config:
     WIGGLE_COUNT = 3
 
     # Camera active duration (seconds)
-<<<<<<< HEAD
     CAMERA_ACTIVE_DURATION = 30
-=======
-    CAMERA_ACTIVE_DURATION = 10
->>>>>>> 00b92f75252bd1df0e8cd549393704f22ff81157
     
     # Performance
     TARGET_FPS = 15
