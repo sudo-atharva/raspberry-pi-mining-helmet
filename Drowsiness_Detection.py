@@ -26,6 +26,10 @@ from imutils import face_utils
 import imutils
 import numpy as np
 
+# For logging
+import csv
+import os
+
 # GPIO and sensor imports with error handling
 try:
     import RPi.GPIO as GPIO
@@ -646,19 +650,20 @@ class HelmetSafetySystem:
         self.setup_gpio()
 
         # CSV log file
-        self.csv_log_path = "helmet_log.csv"
+        self.csv_log_path = os.path.abspath("helmet_log.csv")
         self._init_csv_log()
 
     def _init_csv_log(self):
-        import os
-        import csv
         if not os.path.exists(self.csv_log_path):
-            with open(self.csv_log_path, "w", newline="") as csvfile:
-                writer = csv.writer(csvfile)
-                writer.writerow(["timestamp", "event", "status", "gps", "temp", "hum"])
+            try:
+                with open(self.csv_log_path, "w", newline="") as csvfile:
+                    writer = csv.writer(csvfile)
+                    writer.writerow(["timestamp", "event", "status", "gps", "temp", "hum"])
+                print(f"CSV log created at {self.csv_log_path}")
+            except Exception as e:
+                print(f"CSV log creation error: {e}")
 
     def log_event(self, event, status=None):
-        import csv
         data = self.sensor_data.get_data()
         gps = f"({data['lat']:.6f},{data['lon']:.6f})"
         temp = data.get('temperature', '-')
@@ -668,6 +673,7 @@ class HelmetSafetySystem:
             with open(self.csv_log_path, "a", newline="") as csvfile:
                 writer = csv.writer(csvfile)
                 writer.writerow([t, event, status if status else "-", gps, temp, hum])
+            print(f"Logged event: {event}, status: {status}")
         except Exception as e:
             print(f"CSV log error: {e}")
     
@@ -762,9 +768,10 @@ class HelmetSafetySystem:
             if GPIO_AVAILABLE:
                 GPIO.output(Config.LED_PIN, GPIO.LOW)
             try:
-                cv2.destroyWindow("Mining Helmet Safety System")
-            except Exception:
-                pass
+                cv2.destroyAllWindows()
+                print("cv2.destroyAllWindows() called")
+            except Exception as e:
+                print(f"cv2.destroyAllWindows error: {e}")
             print("Camera deactivated")
             self.log_event("CAMERA_DEACTIVATED")
     
