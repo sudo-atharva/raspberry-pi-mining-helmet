@@ -44,11 +44,16 @@ try:
 except ImportError:
     SPI_AVAILABLE = False
 
+
+# DHT sensor support (DHT11/DHT22 via adafruit_dht)
 try:
-    import Adafruit_DHT
-    DHT_AVAILABLE = True
+    import board
+    import adafruit_dht
+    DHT_LIB_AVAILABLE = True
 except ImportError:
-    DHT_AVAILABLE = False
+    board = None
+    adafruit_dht = None
+    DHT_LIB_AVAILABLE = False
 
 try:
     from smbus2 import SMBus
@@ -60,36 +65,37 @@ except ImportError:
 # CONFIGURATION
 # =============================================================================
 
+
 class Config:
     """Configuration class for all system settings"""
-    
     # Hardware enable flags
     ENABLE_HC12 = False
     ENABLE_MQ_SENSOR = False
-    ENABLE_DHT22 = True
+    ENABLE_DHT22 = False  # Set True for DHT22
+    ENABLE_DHT11 = True   # Set True for DHT11
     ENABLE_GPS = True
     ENABLE_MPU6050 = True
-    
+
     # GPIO Pins
     BUZZER_PIN = 23
     BUTTON_PIN = 17
     LED_PIN = 27
     MQ_ALERT_PIN = 22
-    
+
     # Sensor settings
     DHT_PIN = 4
     MQ_CHANNEL = 0
-    
+
     # Camera settings
     CAMERA_WIDTH = 320
     CAMERA_HEIGHT = 240
     CAMERA_FPS = 20
-    
+
     # Drowsiness detection
     EAR_THRESHOLD = 0.25
     FRAME_CHECK = 6
     FACE_DETECT_INTERVAL = 3
-    
+
     # Wiggle detection
     WIGGLE_THRESHOLD = 20
     WIGGLE_WINDOW = 2.0
@@ -97,17 +103,17 @@ class Config:
 
     # Camera active duration (seconds)
     CAMERA_ACTIVE_DURATION = 30
-    
+
     # Performance
     TARGET_FPS = 15
     SENSOR_UPDATE_INTERVAL = 0.05
     DHT_UPDATE_INTERVAL = 3.0
     GPS_UPDATE_INTERVAL = 1.0
-    
+
     # Communication
     HC12_BAUDRATE = 9600
     GPS_BAUDRATE = 9600
-    
+
     # Paths
     FACE_LANDMARKS_PATH = "models/shape_predictor_68_face_landmarks.dat"
 
@@ -263,41 +269,51 @@ class MPU6050Sensor:
             self.read_sensors()
             time.sleep(Config.SENSOR_UPDATE_INTERVAL)
 
-class DHT22Sensor:
-    """DHT22 temperature and humidity sensor"""
-    
+
+# General DHT sensor class supporting DHT11 and DHT22
+class DHTSensor:
+    """DHT11/DHT22 temperature and humidity sensor"""
     def __init__(self, sensor_data):
         self.sensor_data = sensor_data
         self.running = False
         self.thread = None
-    
+        self.dht_device = None
+        self.sensor_type = None
+        # Determine which sensor to use
+        if DHT_LIB_AVAILABLE:
+            if Config.ENABLE_DHT22:
+                self.sensor_type = 'DHT22'
+                self.dht_device = adafruit_dht.DHT22(board.D4)
+            elif Config.ENABLE_DHT11:
+                self.sensor_type = 'DHT11'
+                self.dht_device = adafruit_dht.DHT11(board.D4)
+
     def start(self):
-        """Start DHT22 reading thread"""
-        if not DHT_AVAILABLE or not Config.ENABLE_DHT22:
+        if not DHT_LIB_AVAILABLE or not (Config.ENABLE_DHT22 or Config.ENABLE_DHT11):
+            print("DHT library not available or DHT sensor not enabled.")
             return
-        
+        if not self.dht_device:
+            print("DHT device not initialized.")
+            return
         self.running = True
         self.thread = threading.Thread(target=self._sensor_loop, daemon=True)
         self.thread.start()
-    
+
     def stop(self):
-        """Stop DHT22 reading"""
         self.running = False
         if self.thread:
             self.thread.join(timeout=1)
-    
+
     def _sensor_loop(self):
-        """Main DHT22 reading loop with debug prints"""
         while self.running:
             try:
-                humidity, temperature = Adafruit_DHT.read_retry(
-                    Adafruit_DHT.DHT22, Config.DHT_PIN, delay_seconds=0.1
-                )
-                print(f"[DHT22] Read: Temp={temperature}, Hum={humidity}")
+                temperature = self.dht_device.temperature
+                humidity = self.dht_device.humidity
+                print(f"[{self.sensor_type}] Read: Temp={temperature}, Hum={humidity}")
                 if humidity is not None and temperature is not None:
                     self.sensor_data.update(temperature=temperature, humidity=humidity)
             except Exception as e:
-                print(f"DHT22 read error: {e}")
+                print(f"{self.sensor_type} read error: {e}")
             time.sleep(Config.DHT_UPDATE_INTERVAL)
 
 class GPSSensor:
@@ -643,7 +659,7 @@ class HelmetSafetySystem:
         
         # Sensors
         self.mpu6050 = MPU6050Sensor(self.sensor_data)
-        self.dht22 = DHT22Sensor(self.sensor_data)
+        self.dht = DHTSensor(self.sensor_data)
         self.gps = GPSSensor(self.sensor_data)
         
         # Initialize GPIO
@@ -731,8 +747,8 @@ class HelmetSafetySystem:
             self.sensor_data.calibrate_gyro()
             print("MPU6050 calibrated")
         
-        if Config.ENABLE_DHT22:
-            self.dht22.start()
+        if Config.ENABLE_DHT22 or Config.ENABLE_DHT11:
+            self.dht.start()
         
         if Config.ENABLE_GPS:
             self.gps.start()
@@ -914,7 +930,7 @@ class HelmetSafetySystem:
         
         # Stop sensors
         self.mpu6050.stop()
-        self.dht22.stop()
+        self.dht.stop()
         self.gps.stop()
         
         # Clean up hardware
