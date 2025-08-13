@@ -90,6 +90,8 @@ class Config:
     CAMERA_WIDTH = 320
     CAMERA_HEIGHT = 240
     CAMERA_FPS = 20
+        # Camera orientation: 'normal', 'flip', 'rotate_90', 'rotate_180', 'rotate_270'
+        CAMERA_ORIENTATION = 'normal'
 
     # Drowsiness detection
     EAR_THRESHOLD = 0.25
@@ -401,6 +403,7 @@ class CameraManager:
         self.is_pi_camera = False
         self.frame_buffer = deque(maxlen=2)
         self.lock = threading.Lock()
+        self.orientation = Config.CAMERA_ORIENTATION
     
     def initialize(self):
         """Initialize camera with optimization"""
@@ -454,15 +457,30 @@ class CameraManager:
             try:
                 if self.cap:
                     ret, frame = self.cap.read()
-                    return frame if ret else None
+                        if not ret or frame is None:
+                            return None
+                        frame = self._apply_orientation(frame)
+                        return frame
                 elif self.picam2:
                     frame = self.picam2.capture_array()
                     if frame.shape[-1] == 4:
                         frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+                        frame = self._apply_orientation(frame)
                     return frame
             except Exception as e:
                 print(f"Camera read error: {e}")
                 return None
+    def _apply_orientation(self, frame):
+        """Apply orientation to frame based on config"""
+        if self.orientation == 'flip':
+            return cv2.flip(frame, -1)  # Flip both axes
+        elif self.orientation == 'rotate_90':
+            return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+        elif self.orientation == 'rotate_180':
+            return cv2.rotate(frame, cv2.ROTATE_180)
+        elif self.orientation == 'rotate_270':
+            return cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        return frame
         
         return None
     
