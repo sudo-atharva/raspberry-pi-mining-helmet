@@ -90,8 +90,8 @@ class Config:
     CAMERA_WIDTH = 320
     CAMERA_HEIGHT = 240
     CAMERA_FPS = 20
-        # Camera orientation: 'normal', 'flip', 'rotate_90', 'rotate_180', 'rotate_270'
-        CAMERA_ORIENTATION = 'normal'
+    # Camera orientation: 'normal', 'flip', 'rotate_90', 'rotate_180', 'rotate_270'
+    CAMERA_ORIENTATION = 'normal'
 
     # Drowsiness detection
     EAR_THRESHOLD = 0.25
@@ -457,10 +457,10 @@ class CameraManager:
             try:
                 if self.cap:
                     ret, frame = self.cap.read()
-                        if not ret or frame is None:
-                            return None
-                        frame = self._apply_orientation(frame)
-                        return frame
+                    if not ret or frame is None:
+                        return None
+                    frame = self._apply_orientation(frame)
+                    return frame
                 elif self.picam2:
                     frame = self.picam2.capture_array()
                     if frame.shape[-1] == 4:
