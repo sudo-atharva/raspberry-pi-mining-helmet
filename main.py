@@ -472,6 +472,9 @@ class CameraManager:
                 return None
     def _apply_orientation(self, frame):
         """Apply orientation to frame based on config"""
+        # Debug print to confirm orientation is being used
+        if self.orientation != 'normal':
+            print(f"Applying camera orientation: {self.orientation}")
         if self.orientation == 'flip':
             return cv2.flip(frame, -1)  # Flip both axes
         elif self.orientation == 'rotate_90':
@@ -481,8 +484,6 @@ class CameraManager:
         elif self.orientation == 'rotate_270':
             return cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
         return frame
-        
-        return None
     
     def release(self):
         """Release camera resources"""
