@@ -69,10 +69,10 @@ except ImportError:
 class Config:
     """Configuration class for all system settings"""
     # Hardware enable flags
-    ENABLE_HC12 = False
-    ENABLE_MQ_SENSOR = False
-    ENABLE_DHT22 = False  # Set True for DHT22
-    ENABLE_DHT11 = True   # Set True for DHT11
+    ENABLE_HC12 = True
+    ENABLE_MQ_SENSOR = True
+    ENABLE_DHT22 = True  # Set True for DHT22
+    ENABLE_DHT11 = False   # Set True for DHT11
     ENABLE_GPS = True
     ENABLE_MPU6050 = True
 
@@ -91,7 +91,7 @@ class Config:
     CAMERA_HEIGHT = 240
     CAMERA_FPS = 20
     # Camera orientation: 'normal', 'flip', 'rotate_90', 'rotate_180', 'rotate_270'
-    CAMERA_ORIENTATION = 'normal'
+    CAMERA_ORIENTATION = 'rotate_180'  # Rotate 180 degrees for better view
 
     # Drowsiness detection
     EAR_THRESHOLD = 0.25
@@ -921,7 +921,18 @@ class HelmetSafetySystem:
                                 # Face detected and not drowsy - keep camera on
                                 self.activate_buzzer(False)
 
-                            cv2.imshow("Mining Helmet Safety System", processed_frame)
+                            # Rotate output frame for display based on config
+                            orientation = Config.CAMERA_ORIENTATION
+                            display_frame = processed_frame
+                            if orientation == 'flip':
+                                display_frame = cv2.flip(processed_frame, -1)
+                            elif orientation == 'rotate_90':
+                                display_frame = cv2.rotate(processed_frame, cv2.ROTATE_90_CLOCKWISE)
+                            elif orientation == 'rotate_180':
+                                display_frame = cv2.rotate(processed_frame, cv2.ROTATE_180)
+                            elif orientation == 'rotate_270':
+                                display_frame = cv2.rotate(processed_frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                            cv2.imshow("Mining Helmet Safety System", display_frame)
 
                             if cv2.waitKey(1) & 0xFF == ord('q'):
                                 self.running = False
