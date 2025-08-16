@@ -69,14 +69,65 @@ This project implements a robust, modular safety system for mining helmets using
 
 ## Wiring and GPIO Pinout
 
-| Component      | GPIO Pin | Notes                       |
-|---------------|----------|-----------------------------|
-| DHT22         | 4        | Data pin                    |
-| MPU6050       | I2C      | SDA/SCL (hardware I2C)      |
-| MQ Gas Alert  | 22       | Output pin for gas alert    |
-| LED           | 27       | Output pin for status       |
-| Button        | 17       | Input pin for calibration   |
-| Buzzer        | 23       | Output pin for drowsiness   |
+### Detailed Pin Connections
+
+#### Power Pins
+```
+3.3V (Pin 1):
+  - DHT22/DHT11 VCC
+  - MPU6050 VCC
+
+5V (Pin 2 or 4):
+  - HC-12 VCC
+
+Ground Pins (Pin 6, 9, 14, 20, 25, 30, 34, or 39):
+  - All components' GND pins must be connected to a ground pin
+```
+
+#### GPIO Connections
+```
+GPIO 4 (Pin 7):     DHT22/DHT11 DATA pin
+GPIO 14 (Pin 8):    HC-12 RX pin (connects to HC-12 TX)
+GPIO 15 (Pin 10):   HC-12 TX pin (connects to HC-12 RX)
+GPIO 17 (Pin 11):   Button (other terminal to Ground)
+GPIO 23 (Pin 16):   Buzzer positive (negative to Ground)
+GPIO 27 (Pin 13):   LED anode via 220Ω resistor (cathode to Ground)
+GPIO 22 (Pin 15):   MQ Gas Alert pin
+
+I2C Connections (MPU6050):
+GPIO 2/SDA1 (Pin 3): MPU6050 SDA
+GPIO 3/SCL1 (Pin 5): MPU6050 SCL
+```
+
+#### Component-specific Notes
+1. **HC-12 Wireless Module**
+   - VCC → 5V
+   - GND → Ground
+   - TX → GPIO15 (RXD)
+   - RX → GPIO14 (TXD)
+
+2. **DHT22/DHT11 Temperature Sensor**
+   - VCC → 3.3V
+   - DATA → GPIO4
+   - GND → Ground
+
+3. **MPU6050 Accelerometer/Gyroscope**
+   - VCC → 3.3V
+   - GND → Ground
+   - SDA → GPIO2 (SDA1)
+   - SCL → GPIO3 (SCL1)
+
+4. **LED Indicator**
+   - Anode → GPIO27 through 220Ω resistor
+   - Cathode → Ground
+
+5. **Buzzer**
+   - Positive → GPIO23
+   - Negative → Ground
+
+6. **Button**
+   - One terminal → GPIO17
+   - Other terminal → Ground
 
 ## Software Architecture
 
