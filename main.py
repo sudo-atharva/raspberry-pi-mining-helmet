@@ -81,6 +81,7 @@ class Config:
     BUTTON_PIN = 17
     LED_PIN = 27
     MQ_ALERT_PIN = 22
+    GPS_LED_PIN = 25  # LED to indicate GPS fix status
 
     # Sensor settings
     DHT_PIN = 4
@@ -326,6 +327,14 @@ class GPSSensor:
         self.running = False
         self.thread = None
         self.serial_port = None
+        self.has_fix = False
+        self.led_state = False
+        self.last_blink = 0
+        
+        # Setup GPS status LED if GPIO is available
+        if GPIO_AVAILABLE:
+            GPIO.setup(Config.GPS_LED_PIN, GPIO.OUT)
+            GPIO.output(Config.GPS_LED_PIN, GPIO.LOW)
     
     def start(self):
         """Start GPS reading thread"""
@@ -356,6 +365,8 @@ class GPSSensor:
             self.thread.join(timeout=1)
         if self.serial_port:
             self.serial_port.close()
+        if GPIO_AVAILABLE:
+            GPIO.output(Config.GPS_LED_PIN, GPIO.LOW)
     
     def _sensor_loop(self):
         """Main GPS reading loop"""
@@ -373,20 +384,45 @@ class GPSSensor:
         """Parse GPGGA sentence"""
         try:
             parts = line.split(',')
-            if len(parts) > 5 and parts[2] and parts[4]:
-                # Parse latitude
-                lat_raw = float(parts[2])
-                lat = int(lat_raw/100) + (lat_raw % 100)/60
-                if parts[3] == 'S':
-                    lat = -lat
+            if len(parts) > 6:  # Check fix quality
+                fix_quality = int(parts[6]) if parts[6] else 0
+                self.has_fix = fix_quality > 0
                 
-                # Parse longitude
-                lon_raw = float(parts[4])
-                lon = int(lon_raw/100) + (lon_raw % 100)/60
-                if parts[5] == 'W':
-                    lon = -lon
+                # Update GPS LED status
+                if GPIO_AVAILABLE:
+                    current_time = time.time()
+                    if self.has_fix:
+                        # Solid LED when we have a fix
+                        if not self.led_state:
+                            GPIO.output(Config.GPS_LED_PIN, GPIO.HIGH)
+                            self.led_state = True
+                    else:
+                        # Blink LED when searching for fix (1 Hz)
+                        if current_time - self.last_blink >= 0.5:
+                            self.led_state = not self.led_state
+                            GPIO.output(Config.GPS_LED_PIN, GPIO.HIGH if self.led_state else GPIO.LOW)
+                            self.last_blink = current_time
                 
-                self.sensor_data.update(lat=lat, lon=lon)
+                # Parse coordinates if we have data
+                if len(parts) > 5 and parts[2] and parts[4]:
+                    # Parse latitude
+                    lat_raw = float(parts[2])
+                    lat = int(lat_raw/100) + (lat_raw % 100)/60
+                    if parts[3] == 'S':
+                        lat = -lat
+                    
+                    # Parse longitude
+                    lon_raw = float(parts[4])
+                    lon = int(lon_raw/100) + (lon_raw % 100)/60
+                    if parts[5] == 'W':
+                        lon = -lon
+                    
+                    self.sensor_data.update(lat=lat, lon=lon)
+                    
+                    if self.has_fix:
+                        print(f"GPS Fix: lat={lat:.6f}, lon={lon:.6f}, Quality={fix_quality}")
+                if GPIO_AVAILABLE:
+                    GPIO.output(Config.GPS_LED_PIN, GPIO.HIGH)  # Solid LED when fix obtained
         except Exception as e:
             print(f"GPS parse error: {e}")
 
