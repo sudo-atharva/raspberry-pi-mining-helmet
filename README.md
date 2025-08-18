@@ -1,15 +1,25 @@
 
 
-# Mining Worker & Explorer Safety Helmet: Conceptual Design
+# Mining Worker & Explorer Safety Helmet
 
-This project is a conceptual design for a smart safety helmet for mining workers and explorers. It combines drowsiness detection, helmet tilt monitoring, environmental sensing, and emergency alerting using Raspberry Pi 4 and multiple sensors. All data is sent wirelessly via UART (HC-12) to a remote device for real-time monitoring and rescue operations.
+A sophisticated safety system for mining helmets, integrating multiple sensors and real-time monitoring capabilities using Raspberry Pi 4.
 
----
+## Table of Contents
+- [Overview](#overview)
+- [Features](#features)
+- [Hardware Requirements](#hardware-requirements)
+- [Software Dependencies](#software-dependencies)
+- [System Components](#system-components)
+- [Pin Configuration](#pin-configuration)
+- [Setup and Installation](#setup-and-installation)
+- [Testing Tools](#testing-tools)
+- [System Architecture](#system-architecture)
 
+## Overview
 
+This project implements an advanced safety monitoring system for mining helmets. It combines computer vision for drowsiness detection, environmental sensing, motion tracking, and wireless communication to create a comprehensive safety solution for mining workers and explorers.
 
-
-## Features & Functionalities
+## Features
 
 - **Gyro Calibration Button (GPIO 17):** Allows the helmet to set its current orientation as zero. Essential for adapting to different head positions and environments.
 - **Helmet Tilt Detection:** If the helmet is tilted more than 90° for over 5 seconds (using MPU6050), the system activates the camera and sets GPIO 27 high to turn on an LED. This indicates a possible fall or collapse.
@@ -28,42 +38,180 @@ This project is a conceptual design for a smart safety helmet for mining workers
 
 
 
-### 1. Hardware Required
+### Core Safety Features
+1. **Drowsiness Detection System**
+   - Real-time eye monitoring using facial landmarks
+   - Eye Aspect Ratio (EAR) calculation for drowsiness detection
+   - Configurable threshold (default: 0.25) and frame check count (default: 6)
+   - Visual alerts on detected drowsiness
+   - Automatic face detection optimization with caching
 
-- **Raspberry Pi 4 (4GB RAM recommended)**
-- **USB webcam or Pi Camera (Picamera2)**
-- **DHT22 sensor** (GPIO 4 for data)
-- **MPU6050** (I2C)
+2. **Motion and Orientation Monitoring**
+   - Head tilt detection via MPU6050
+   - Wiggle detection system
+   - Configurable parameters:
+     - Wiggle threshold: 20
+     - Wiggle window: 2.0 seconds
+     - Required wiggle count: 3
+   - Gyroscope calibration via button (GPIO 17)
 
-# Mining Helmet Safety System
+3. **Environmental Monitoring**
+   - Temperature and humidity sensing (DHT22/DHT11)
+   - Gas detection (MQ series sensors)
+   - Configurable update intervals:
+     - Sensors: 0.05s
+     - DHT: 3.0s
+     - GPS: 1.0s
 
-## Overview
+4. **GPS Location Tracking**
+   - Real-time position monitoring
+   - GPS fix status indication via LED (GPIO 25)
+   - LED patterns:
+     - Solid: GPS fix acquired
+     - Blinking (1 Hz): Searching for fix
+     - Off: GPS disabled/error
 
-This project implements a robust, modular safety system for mining helmets using a Raspberry Pi 4. The system integrates drowsiness detection, head movement (wiggle) detection, environmental sensing, GPS location tracking, and wireless alerting. It is designed for reliability, real-time responsiveness, and professional deployment in safety-critical environments.
+### System Features
+1. **Camera Management**
+   - Automatic camera selection (USB webcam/PiCamera2)
+   - Configurable parameters:
+     - Resolution: 320x240
+     - FPS: 20
+     - Orientation options: normal/flip/rotate_90/180/270
+   - Power-efficient activation based on events
 
-## Features
+2. **Alert System**
+   - Multi-channel alerting:
+     - Visual (LED indicators)
+     - Audible (Buzzer on GPIO 23)
+     - Wireless (HC-12 transmission)
+   - Alert types:
+     - Drowsiness detection
+     - Gas presence
+     - GPS status
+     - System status
 
-- **Drowsiness Detection:** Uses OpenCV, dlib, and facial landmarks to monitor eye aspect ratio (EAR) and detect drowsiness. If drowsiness is detected, a buzzer is activated and alerts are sent.
-- **Head Wiggle Detection:** Monitors MPU6050 gyroscope for rapid head movements. Camera and LED are activated upon sufficient wiggling.
-- **Environmental Sensing:** Reads temperature and humidity from DHT22, and detects harmful gases (LPG, CO, CH4) using MQ sensor via MCP3008 ADC. Gas alerts are sent wirelessly.
-- **GPS Location Tracking:** Acquires real-time location using NEO-6M GPS or compatible modules.
-- **Wireless Alerting:** Sends alerts and sensor data via HC-12 UART wireless module.
-- **Buzzer Alert:** Activates buzzer (GPIO 23) when drowsiness is detected for immediate physical feedback.
-- **Modular Sensor Test Scripts:** Individual scripts for hardware validation and troubleshooting.
-- **Automatic Camera Selection:** Supports both USB webcams and PiCamera2, with optimized settings for performance.
-- **Robust Error Handling:** All hardware interfaces and threads are protected against runtime errors.
-- **Resource Cleanup:** Ensures all GPIO and hardware resources are safely released on exit or error.
+3. **Performance Optimization**
+   - Frame resizing for efficient processing
+   - Face detection caching
+   - Configurable FPS targeting (default: 15)
+   - Memory usage monitoring and cleanup
+   - Non-blocking I/O operations
+
+4. **Data Logging**
+   - CSV-based event logging
+   - Timestamp recording
+   - Sensor data capture
+   - Alert history
+   - GPS coordinates tracking
 
 ## Hardware Requirements
 
-- Raspberry Pi 4 (recommended)
-- DHT22 sensor (temperature/humidity)
-- MPU6050 sensor (accelerometer/gyroscope)
-- MQ gas sensor (LPG/CO/CH4) + MCP3008 ADC
-- NEO-6M GPS module (or compatible)
-- HC-12 UART wireless module
-- USB webcam or PiCamera2
-- LED indicator
+### Core Components
+- Raspberry Pi 4 (4GB RAM recommended)
+- Camera options:
+  - USB webcam
+  - Raspberry Pi Camera (PiCamera2 compatible)
+
+### Sensors
+1. **Environmental Sensors**
+   - DHT22/DHT11 temperature and humidity sensor
+     - Data pin: GPIO 4
+   - MQ series gas sensor
+     - Alert pin: GPIO 22
+     - ADC integration (ADS1115 or MCP3008)
+
+2. **Motion Sensors**
+   - MPU6050 accelerometer/gyroscope
+     - I2C interface
+     - 3-axis acceleration and rotation sensing
+
+3. **GPS Module**
+   - NEO-6M or compatible
+   - UART interface
+   - 9600 baud rate
+
+### Communication
+- HC-12 wireless module
+  - UART interface
+  - 9600 baud rate
+  - Configurable channels and power levels
+
+### Input/Output
+1. **Buttons and Controls**
+   - Calibration button (GPIO 17)
+   
+2. **Indicators**
+   - Main LED (GPIO 27)
+   - GPS status LED (GPIO 25)
+   - Buzzer (GPIO 23)
+
+## Pin Configuration
+
+| Component | Pin | Description |
+|-----------|-----|-------------|
+| Buzzer | GPIO 23 | Alert sound output |
+| Button | GPIO 17 | Gyro calibration |
+| Main LED | GPIO 27 | Visual indicator |
+| MQ Alert | GPIO 22 | Gas detection alert |
+| GPS LED | GPIO 25 | GPS fix status |
+| DHT Sensor | GPIO 4 | Temperature/Humidity data |
+| MPU6050 | I2C | SDA/SCL pins |
+| HC-12 | UART | TX/RX pins |
+| GPS Module | UART | TX/RX pins |
+
+## Software Dependencies
+
+### Python Packages
+- OpenCV (cv2)
+- dlib
+- imutils
+- numpy
+- scipy
+- RPi.GPIO
+- smbus2
+- serial
+- adafruit_dht
+- psutil
+
+### System Requirements
+- Python 3.x
+- Face landmarks model file
+- I2C, SPI, and UART enabled on Raspberry Pi
+
+## Testing Tools
+
+The system includes multiple testing utilities:
+
+1. **Serial Communication**
+   - `serial_test.py`: Tests serial ports and baud rates
+   - `hc12_test_transmit.py`: HC-12 transmission testing
+   - `hc12_receiver.py`: HC-12 reception testing
+
+2. **Sensor Testing**
+   - `ads1115_check.py`: ADC functionality
+   - `dht11_check.py`/`dht22_check.py`: Temperature/humidity
+   - `gps_check.py`: GPS functionality
+   - `mpu6050_check.py`: Motion sensor
+   - `mq_check.py`: Gas sensor
+
+## System Architecture
+
+### Core Classes
+1. `HelmetSafetySystem`: Main system coordinator
+2. `CameraManager`: Camera handling and processing
+3. `DrowsinessDetector`: Eye monitoring and alerting
+4. `SensorData`: Thread-safe data management
+5. `PerformanceMonitor`: System metrics tracking
+
+### Sensor Classes
+1. `MPU6050Sensor`: Motion tracking
+2. `DHTSensor`: Environmental monitoring
+3. `GPSSensor`: Location tracking
+4. `HC12Communication`: Wireless communication
+
+### Configuration
+All system parameters are centralized in the `Config` class for easy customization.
 - Physical button (for gyro calibration)
 - Buzzer (for drowsiness alert)
 
