@@ -729,6 +729,7 @@ class HelmetSafetySystem:
         self.last_blink_time = 0
         self.mq_baseline = None
         self.mq_threshold = 0.20  # volts (tweak as needed)
+        self.last_send_time = 0
 
     def _init_csv_log(self):
         if not os.path.exists(self.csv_log_path):
@@ -1007,19 +1008,29 @@ class HelmetSafetySystem:
                 if processing_time < target_loop_time:
                     time.sleep(target_loop_time - processing_time)
 
-                # Send all sensor data via HC-12 in a format parsed by boss_monitor.py
-                data = self.sensor_data.get_data()
-                drowsy_status = 'DROWSY' if 'drowsy' in locals() and drowsy else 'AWAKE'
-                # Compose message expected by boss_monitor.py
-                # First token is status, followed by GPS, TEMP, HUM, TIME
-                message = (
-                    f"{drowsy_status},"
-                    f"GPS:({data.get('lat', 0):.6f},{data.get('lon', 0):.6f}),"
-                    f"TEMP:{(data.get('temperature') if data.get('temperature') is not None else 0):.1f},"
-                    f"HUM:{(data.get('humidity') if data.get('humidity') is not None else 0):.1f},"
-                    f"TIME:{datetime.now().strftime('%H:%M:%S')}\n"
-                )
-                self.hc12.send_data(message)
+                # Fixed-interval transmitter independent of loop jitter
+                now = time.time()
+                if now - self.last_send_time >= 1.0:  # send once per second
+                    data = self.sensor_data.get_data()
+                    drowsy_status = 'DROWSY' if 'drowsy' in locals() and drowsy else 'AWAKE'
+                    # Compose message expected by boss monitor
+                    message = (
+                        f"{drowsy_status},"
+                        f"GPS:({data.get('lat', 0):.6f},{data.get('lon', 0):.6f}),"
+                        f"TEMP:{(data.get('temperature') if data.get('temperature') is not None else 0):.1f},"
+                        f"HUM:{(data.get('humidity') if data.get('humidity') is not None else 0):.1f},"
+                        f"TIME:{datetime.now().strftime('%H:%M:%S')}\n"
+                    )
+                    if not self.hc12.connected:
+                        # Attempt (re)initialization if disconnected
+                        self.hc12.initialize()
+                    sent_ok = self.hc12.send_data(message)
+                    if sent_ok:
+                        self.last_send_time = now
+                    else:
+                        # Log once a while to avoid spam
+                        if int(now) % 5 == 0:
+                            print("HC-12: send failed or not connected")
 
                 # Optional: MQ sensor logic and heartbeat blink
                 if Config.ENABLE_MQ_SENSOR:
@@ -1036,7 +1047,6 @@ class HelmetSafetySystem:
                                 f"(baseline: {self.mq_baseline:.2f} V)"
                             )
                 if GPIO_AVAILABLE:
-                    now = time.time()
                     if now - self.last_blink_time > 5:
                         GPIO.output(self.blink_pin, GPIO.HIGH)
                         time.sleep(0.1)

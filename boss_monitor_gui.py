@@ -6,6 +6,13 @@ import threading
 import time
 from datetime import datetime
 import math
+from collections import deque
+try:
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    from matplotlib.figure import Figure
+    MATPLOTLIB_AVAILABLE = True
+except Exception:
+    MATPLOTLIB_AVAILABLE = False
 
 # =============================
 # CONFIGURATION
@@ -63,6 +70,10 @@ class ModernBossMonitorGUI:
         
         self.log = []
         self.alert_count = 0
+        self.temp_history = deque(maxlen=300)
+        self.hum_history = deque(maxlen=300)
+        self.index_history = deque(maxlen=300)
+        self.sample_index = 0
         
         # Create main container
         self.create_main_layout()
@@ -266,6 +277,10 @@ class ModernBossMonitorGUI:
         
         # Right panel - Log and controls
         self.create_log_panel(content_frame)
+        
+        # Charts below the log (if matplotlib available)
+        if MATPLOTLIB_AVAILABLE:
+            self.create_charts(content_frame)
 
     def create_header(self, parent):
         """Create the header section with title and connection status"""
@@ -358,6 +373,8 @@ class ModernBossMonitorGUI:
                               bg=self.colors['bg_card'],
                               fg=self.colors['primary'])
         value_label.grid(row=0, column=1, sticky="e", padx=20, pady=(20, 10))
+        if title == "Worker Status":
+            self.status_value_label = value_label
         
         # Bottom border
         tk.Frame(card, height=3, bg=self.colors['primary']).grid(row=1, column=0, columnspan=2, sticky="ew", padx=20)
@@ -399,6 +416,7 @@ class ModernBossMonitorGUI:
         log_frame.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
         log_frame.grid_columnconfigure(0, weight=1)
         log_frame.grid_rowconfigure(1, weight=1)
+        log_frame.grid_rowconfigure(2, weight=0)
         
         # Log header
         log_header = tk.Frame(log_frame, bg=self.colors['bg_card'], relief='flat', bd=0)
@@ -452,6 +470,34 @@ class ModernBossMonitorGUI:
         # Configure listbox colors
         self.log_listbox.configure(selectbackground=self.colors['primary'],
                                   selectforeground=self.colors['text_primary'])
+
+        self.log_frame = log_frame
+
+    def create_charts(self, parent):
+        """Create matplotlib charts for temperature and humidity"""
+        charts_container = tk.Frame(parent, bg=self.colors['bg_dark'])
+        charts_container.grid(row=1, column=1, sticky="ew", padx=(10, 0))
+        
+        fig = Figure(figsize=(5.5, 2.5), dpi=100)
+        self.ax_temp = fig.add_subplot(211)
+        self.ax_hum = fig.add_subplot(212)
+        
+        self.ax_temp.set_title('Temperature (°C)', color=self.colors['text_primary'], fontsize=10)
+        self.ax_hum.set_title('Humidity (%)', color=self.colors['text_primary'], fontsize=10)
+        
+        for ax in (self.ax_temp, self.ax_hum):
+            ax.grid(True, alpha=0.2)
+            ax.tick_params(colors=self.colors['text_secondary'])
+            ax.spines['bottom'].set_color(self.colors['text_secondary'])
+            ax.spines['top'].set_color(self.colors['text_secondary'])
+            ax.spines['left'].set_color(self.colors['text_secondary'])
+            ax.spines['right'].set_color(self.colors['text_secondary'])
+        
+        self.temp_line, = self.ax_temp.plot([], [], color='#f6ad55')
+        self.hum_line, = self.ax_hum.plot([], [], color='#63b3ed')
+        
+        self.canvas = FigureCanvasTkAgg(fig, master=charts_container)
+        self.canvas.get_tk_widget().pack(fill=tk.X, expand=False)
 
     def clear_log(self):
         """Clear the log display"""
@@ -550,6 +596,47 @@ class ModernBossMonitorGUI:
         self.alert_count += 1
         self.alert_counter_var.set(str(self.alert_count))
         
+        # Alert color for status
+        try:
+            if hasattr(self, 'status_value_label'):
+                if 'DROWSY' in status or 'NO_FACE' in status or 'ALERT' in status:
+                    self.status_value_label.configure(fg=self.colors['danger'])
+                elif 'AWAKE' in status or 'FACE' in status:
+                    self.status_value_label.configure(fg=self.colors['success'])
+                else:
+                    self.status_value_label.configure(fg=self.colors['primary'])
+        except Exception:
+            pass
+
+        # Update charts data
+        try:
+            temp_f = float(str(temp).replace('°C','').strip()) if temp not in ('-', '') else None
+            hum_f = float(str(hum).replace('%','').strip()) if hum not in ('-', '') else None
+        except Exception:
+            temp_f = None
+            hum_f = None
+        self.sample_index += 1
+        self.index_history.append(self.sample_index)
+        self.temp_history.append(temp_f if temp_f is not None else float('nan'))
+        self.hum_history.append(hum_f if hum_f is not None else float('nan'))
+        
+        # Redraw charts
+        try:
+            x = list(self.index_history)
+            self.temp_line.set_data(x, list(self.temp_history))
+            self.hum_line.set_data(x, list(self.hum_history))
+            if x:
+                xmin = max(0, x[-1] - 300)
+                xmax = x[-1] + 1
+                self.ax_temp.set_xlim(xmin, xmax)
+                self.ax_hum.set_xlim(xmin, xmax)
+            # Autoscale y
+            self.ax_temp.relim(); self.ax_temp.autoscale_view(scaley=True)
+            self.ax_hum.relim(); self.ax_hum.autoscale_view(scaley=True)
+            self.canvas.draw_idle()
+        except Exception:
+            pass
+
         # Create log entry with timestamp and formatting
         log_entry = f"[{t}] {status} | GPS: {gps} | Temp: {temp}°C | Hum: {hum}%"
         self.log_listbox.insert(0, log_entry)
