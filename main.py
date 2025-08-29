@@ -724,6 +724,12 @@ class HelmetSafetySystem:
         self.csv_log_path = os.path.abspath("helmet_log.csv")
         self._init_csv_log()
 
+        # Defaults for indicators and MQ sensor-related placeholders
+        self.blink_pin = Config.LED_PIN
+        self.last_blink_time = 0
+        self.mq_baseline = None
+        self.mq_threshold = 0.20  # volts (tweak as needed)
+
     def _init_csv_log(self):
         if not os.path.exists(self.csv_log_path):
             try:
@@ -789,8 +795,7 @@ class HelmetSafetySystem:
         
         # Initialize camera
         if not self.camera_manager.initialize():
-            print("Error: Camera initialization failed")
-            return False
+            print("Warning: Camera initialization failed. Continuing without camera.")
         
         # Initialize communication
         self.hc12.initialize()
@@ -922,21 +927,25 @@ class HelmetSafetySystem:
         self.running = True
         print("System ready. Wiggle head to activate camera.")
         print("Press 'q' to quit, 'calibrate' to recalibrate gyro")
-            # MQ sensor calibration at startup
-            print("Calibrating MQ sensor baseline. Please ensure clean air.")
-            mq_samples = []
-            calibration_start = time.time()
-            while time.time() - calibration_start < 5:
-                mq_voltage = self.sensor_data.get_data().get('gas_percent', 0)
-                mq_samples.append(mq_voltage)
-                # Blink LED during calibration
-                if GPIO_AVAILABLE:
-                    GPIO.output(self.blink_pin, GPIO.HIGH)
-                    time.sleep(0.2)
-                    GPIO.output(self.blink_pin, GPIO.LOW)
-                    time.sleep(0.2)
-            self.mq_baseline = sum(mq_samples) / max(1, len(mq_samples))
-            print(f"MQ sensor baseline calibrated: {self.mq_baseline:.2f} V")
+        # MQ sensor calibration at startup (guarded)
+        if Config.ENABLE_MQ_SENSOR:
+            try:
+                print("Calibrating MQ sensor baseline. Please ensure clean air.")
+                mq_samples = []
+                calibration_start = time.time()
+                while time.time() - calibration_start < 5:
+                    mq_voltage = self.sensor_data.get_data().get('gas_percent', 0)
+                    mq_samples.append(mq_voltage)
+                    # Blink LED during calibration
+                    if GPIO_AVAILABLE:
+                        GPIO.output(self.blink_pin, GPIO.HIGH)
+                        time.sleep(0.2)
+                        GPIO.output(self.blink_pin, GPIO.LOW)
+                        time.sleep(0.2)
+                self.mq_baseline = sum(mq_samples) / max(1, len(mq_samples))
+                print(f"MQ sensor baseline calibrated: {self.mq_baseline:.2f} V")
+            except Exception as e:
+                print(f"MQ calibration skipped due to error: {e}")
 
         try:
             while self.running:
@@ -997,38 +1006,42 @@ class HelmetSafetySystem:
                 target_loop_time = 1.0 / Config.TARGET_FPS
                 if processing_time < target_loop_time:
                     time.sleep(target_loop_time - processing_time)
-                
-                    # Send all sensor data via HC-12
-                    data = self.sensor_data.get_data()
-                    # Drowsiness status
-                    drowsy_status = 'DROWSY' if 'drowsy' in locals() and drowsy else 'AWAKE'
-                    face_status = 'FACE' if 'face_detected' in locals() and face_detected else 'NO_FACE'
-                    # Compose message
-                    message = (
-                        f"MQ:{data.get('gas_percent', 0):.2f}, "
-                        f"Gas:{'DETECTED' if data.get('gas_detected') else 'NONE'}, "
-                        f"Drowsy:{drowsy_status}, Face:{face_status}, "
-                        f"GPS:({data.get('lat', 0):.6f},{data.get('lon', 0):.6f}), "
-                        f"MPU:({data.get('accel_x', 0):.2f},{data.get('accel_y', 0):.2f},{data.get('accel_z', 0):.2f}), "
-                        f"Gyro:({data.get('gyro_x', 0):.2f},{data.get('gyro_y', 0):.2f},{data.get('gyro_z', 0):.2f}), "
-                        f"Temp:{data.get('temperature', 'N/A')}, Hum:{data.get('humidity', 'N/A')}"
-                    )
-                    self.hc12.send_data(message)
-                        # MQ sensor logic: check against baseline and threshold
-                        mq_voltage = data.get('gas_percent', 0)
-                        if self.mq_baseline is not None:
-                            if mq_voltage > self.mq_baseline + self.mq_threshold:
-                                print(f"Gas detected! MQ voltage: {mq_voltage:.2f} V (baseline: {self.mq_baseline:.2f} V)")
-                            else:
-                                print(f"No gas detected. MQ voltage: {mq_voltage:.2f} V (baseline: {self.mq_baseline:.2f} V)")
-                        # Blink LED every 5 seconds when sending data
-                        if GPIO_AVAILABLE:
-                            now = time.time()
-                            if now - self.last_blink_time > 5:
-                                GPIO.output(self.blink_pin, GPIO.HIGH)
-                                time.sleep(0.2)
-                                GPIO.output(self.blink_pin, GPIO.LOW)
-                                self.last_blink_time = now
+
+                # Send all sensor data via HC-12 in a format parsed by boss_monitor.py
+                data = self.sensor_data.get_data()
+                drowsy_status = 'DROWSY' if 'drowsy' in locals() and drowsy else 'AWAKE'
+                # Compose message expected by boss_monitor.py
+                # First token is status, followed by GPS, TEMP, HUM, TIME
+                message = (
+                    f"{drowsy_status},"
+                    f"GPS:({data.get('lat', 0):.6f},{data.get('lon', 0):.6f}),"
+                    f"TEMP:{(data.get('temperature') if data.get('temperature') is not None else 0):.1f},"
+                    f"HUM:{(data.get('humidity') if data.get('humidity') is not None else 0):.1f},"
+                    f"TIME:{datetime.now().strftime('%H:%M:%S')}\n"
+                )
+                self.hc12.send_data(message)
+
+                # Optional: MQ sensor logic and heartbeat blink
+                if Config.ENABLE_MQ_SENSOR:
+                    mq_voltage = data.get('gas_percent', 0)
+                    if self.mq_baseline is not None:
+                        if mq_voltage > self.mq_baseline + self.mq_threshold:
+                            print(
+                                f"Gas detected! MQ voltage: {mq_voltage:.2f} V "
+                                f"(baseline: {self.mq_baseline:.2f} V)"
+                            )
+                        else:
+                            print(
+                                f"No gas detected. MQ voltage: {mq_voltage:.2f} V "
+                                f"(baseline: {self.mq_baseline:.2f} V)"
+                            )
+                if GPIO_AVAILABLE:
+                    now = time.time()
+                    if now - self.last_blink_time > 5:
+                        GPIO.output(self.blink_pin, GPIO.HIGH)
+                        time.sleep(0.1)
+                        GPIO.output(self.blink_pin, GPIO.LOW)
+                        self.last_blink_time = now
 
         except KeyboardInterrupt:
             print("\nStopping system...")
