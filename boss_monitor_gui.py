@@ -109,6 +109,8 @@ class ModernBossMonitorGUI:
         for port in common_ports:
             if port in self.available_ports:
                 if self.try_connect(port):
+                    # Start connection thread immediately after auto-selecting a port
+                    self.start_connection_thread()
                     return
         
         # If no common ports work, show port selection
@@ -119,8 +121,14 @@ class ModernBossMonitorGUI:
         try:
             test_ser = serial.Serial(port, HC12_BAUDRATE, timeout=1)
             test_ser.close()
+            global HC12_PORT
             HC12_PORT = port
             print(f"Auto-connected to {port}")
+            # Update status label preview
+            try:
+                self.port_label.configure(text=f"Port: {HC12_PORT}")
+            except Exception:
+                pass
             return True
         except Exception as e:
             print(f"Failed to connect to {port}: {e}")

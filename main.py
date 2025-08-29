@@ -13,6 +13,7 @@ import threading
 import platform
 import importlib
 import serial
+import serial.tools.list_ports
 import math
 import os
 import sys
@@ -651,21 +652,31 @@ class HC12Communication:
         self.connected = False
     
     def initialize(self):
-        """Initialize HC-12 module"""
+        """Initialize HC-12 module with auto-detection"""
         if not Config.ENABLE_HC12:
             return False
-        
-        # Try different serial ports
-        for port in ['/dev/ttyAMA0', '/dev/ttyS0', '/dev/ttyUSB0']:
+
+        # Candidate ports (common defaults)
+        candidates = set(['/dev/ttyAMA0', '/dev/ttyS0', '/dev/ttyUSB0', '/dev/ttyUSB1', '/dev/ttyACM0', '/dev/ttyACM1'])
+        # Append OS-reported ports
+        try:
+            for p in serial.tools.list_ports.comports():
+                candidates.add(p.device)
+        except Exception:
+            pass
+
+        for port in candidates:
             try:
                 self.serial_port = serial.Serial(port, Config.HC12_BAUDRATE, timeout=1)
                 print(f"HC-12 initialized on {port}")
                 self.connected = True
                 return True
-            except:
+            except Exception:
                 continue
-        
-        print("HC-12 initialization failed")
+
+        print("HC-12 initialization failed: no available ports")
+        self.connected = False
+        self.serial_port = None
         return False
     
     def send_data(self, data):
@@ -677,6 +688,13 @@ class HC12Communication:
                 return True
             except Exception as e:
                 print(f"HC-12 send error: {e}")
+                # Mark disconnected to trigger reconnect attempts by caller
+                self.connected = False
+                try:
+                    self.serial_port.close()
+                except Exception:
+                    pass
+                self.serial_port = None
                 return False
         return False
     
