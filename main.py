@@ -943,35 +943,36 @@ class HelmetSafetySystem:
                     else:
                         frame = self.camera_manager.read_frame()
                         if frame is not None:
-                            face_detected, drowsy, processed_frame = self.drowsiness_detector.detect_drowsiness(frame)
+                                # Always run detection on the original upright frame
+                                face_detected, drowsy, processed_frame = self.drowsiness_detector.detect_drowsiness(frame)
 
-                            if drowsy:
-                                self.activate_buzzer(True)
-                                self.send_alert("DROWSY")
-                                self.log_event("DROWSINESS_DETECTED", "DROWSY")
-                            elif not face_detected:
-                                self.activate_buzzer(False)
-                                self.send_alert("NO_FACE")
-                                self.log_event("NO_FACE_DETECTED", "NO_FACE")
-                            else:
-                                # Face detected and not drowsy - keep camera on
-                                self.activate_buzzer(False)
+                                if drowsy:
+                                    self.activate_buzzer(True)
+                                    self.send_alert("DROWSY")
+                                    self.log_event("DROWSINESS_DETECTED", "DROWSY")
+                                elif not face_detected:
+                                    self.activate_buzzer(False)
+                                    self.send_alert("NO_FACE")
+                                    self.log_event("NO_FACE_DETECTED", "NO_FACE")
+                                else:
+                                    # Face detected and not drowsy - keep camera on
+                                    self.activate_buzzer(False)
 
-                            # Rotate output frame for display based on config
-                            orientation = Config.CAMERA_ORIENTATION
-                            display_frame = processed_frame
-                            if orientation == 'flip':
-                                display_frame = cv2.flip(processed_frame, -1)
-                            elif orientation == 'rotate_90':
-                                display_frame = cv2.rotate(processed_frame, cv2.ROTATE_90_CLOCKWISE)
-                            elif orientation == 'rotate_180':
-                                display_frame = cv2.rotate(processed_frame, cv2.ROTATE_180)
-                            elif orientation == 'rotate_270':
-                                display_frame = cv2.rotate(processed_frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
-                            cv2.imshow("Mining Helmet Safety System", display_frame)
+                                # Rotate only for display/output
+                                orientation = Config.CAMERA_ORIENTATION
+                                display_frame = processed_frame
+                                if orientation == 'flip':
+                                    display_frame = cv2.flip(processed_frame, -1)
+                                elif orientation == 'rotate_90':
+                                    display_frame = cv2.rotate(processed_frame, cv2.ROTATE_90_CLOCKWISE)
+                                elif orientation == 'rotate_180':
+                                    display_frame = cv2.rotate(processed_frame, cv2.ROTATE_180)
+                                elif orientation == 'rotate_270':
+                                    display_frame = cv2.rotate(processed_frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                                cv2.imshow("Mining Helmet Safety System", display_frame)
 
-                            if cv2.waitKey(1) & 0xFF == ord('q'):
-                                self.running = False
+                                if cv2.waitKey(1) & 0xFF == ord('q'):
+                                    self.running = False
 
                 # Update performance monitoring
                 processing_time = time.time() - loop_start
