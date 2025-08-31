@@ -425,7 +425,7 @@ class MQSensor:
     
     def start(self):
         """Start MQ sensor monitoring thread"""
-        if not self.spi:
+        if not self.ads:
             print("MQ sensor not available")
             return
         
@@ -1015,11 +1015,9 @@ class HelmetSafetySystem:
         self.csv_log_path = os.path.abspath("helmet_log.csv")
         self._init_csv_log()
 
-        # Defaults for indicators and MQ sensor-related placeholders
+        # Defaults for indicators and timing
         self.blink_pin = Config.LED_PIN
         self.last_blink_time = 0
-        self.mq_baseline = None
-        self.mq_threshold = 0.20  # volts (tweak as needed)
         self.last_send_time = 0
 
     def _init_csv_log(self):
@@ -1222,25 +1220,6 @@ class HelmetSafetySystem:
         self.running = True
         print("System ready. Wiggle head to activate camera.")
         print("Press 'q' to quit, 'calibrate' to recalibrate gyro")
-        # MQ sensor calibration at startup (guarded)
-        if Config.ENABLE_MQ_SENSOR:
-            try:
-                print("Calibrating MQ sensor baseline. Please ensure clean air.")
-                mq_samples = []
-                calibration_start = time.time()
-                while time.time() - calibration_start < 5:
-                    mq_voltage = self.sensor_data.get_data().get('gas_percent', 0)
-                    mq_samples.append(mq_voltage)
-                    # Blink LED during calibration
-                    if GPIO_AVAILABLE:
-                        GPIO.output(self.blink_pin, GPIO.HIGH)
-                        time.sleep(0.2)
-                        GPIO.output(self.blink_pin, GPIO.LOW)
-                        time.sleep(0.2)
-                self.mq_baseline = sum(mq_samples) / max(1, len(mq_samples))
-                print(f"MQ sensor baseline calibrated: {self.mq_baseline:.2f} V")
-            except Exception as e:
-                print(f"MQ calibration skipped due to error: {e}")
 
         try:
             while self.running:
