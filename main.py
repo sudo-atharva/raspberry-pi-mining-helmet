@@ -530,7 +530,7 @@ class CameraManager:
             self.picam2.close()
 
 class DrowsinessDetector:
-    """Optimized drowsiness detection"""
+    """Enhanced drowsiness detection with improved algorithms"""
     
     def __init__(self):
         self.detector = None
@@ -540,6 +540,8 @@ class DrowsinessDetector:
         self.flag = 0
         self.face_detection_skip = 0
         self.cached_faces = []
+        self.ear_threshold = 0.25  # Eye aspect ratio threshold
+        self.frame_check = 20      # Frames to confirm drowsiness
         
         # Eye landmarks indices
         self.left_eye_start, self.left_eye_end = face_utils.FACIAL_LANDMARKS_68_IDXS["left_eye"]
@@ -624,11 +626,14 @@ class DrowsinessDetector:
                 cv2.drawContours(frame, [right_eye_hull], -1, (0, 255, 0), 1)
                 
                 # Drowsiness detection
-                if ear < Config.EAR_THRESHOLD:
+                if ear < self.ear_threshold:
                     self.flag += 1
-                    if self.flag >= Config.FRAME_CHECK:
+                    if self.flag >= self.frame_check:
                         drowsy = True
                         cv2.putText(frame, "DROWSY ALERT!", (10, 30),
+                                  cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                        # Additional alert text for better visibility
+                        cv2.putText(frame, "****************ALERT!****************", (10, 325),
                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                 else:
                     self.flag = 0
@@ -636,9 +641,25 @@ class DrowsinessDetector:
                 # Display EAR
                 cv2.putText(frame, f"EAR: {ear:.2f}", (10, 60),
                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                # Display frame count for debugging
+                cv2.putText(frame, f"Frame Count: {self.flag}", (10, 90),
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
                 break
         
         return face_detected, drowsy, frame
+
+    def reset_detection(self):
+        """Reset drowsiness detection state"""
+        self.flag = 0
+        self.cached_faces = []
+        self.face_detection_skip = 0
+
+    def set_thresholds(self, ear_threshold=None, frame_check=None):
+        """Set drowsiness detection thresholds"""
+        if ear_threshold is not None:
+            self.ear_threshold = ear_threshold
+        if frame_check is not None:
+            self.frame_check = frame_check
 
 # =============================================================================
 # COMMUNICATION CLASS
