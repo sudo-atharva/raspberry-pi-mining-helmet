@@ -65,11 +65,18 @@ class ModernBossMonitorGUI:
         self.temp_var = tk.StringVar(value="-")
         self.hum_var = tk.StringVar(value="-")
         self.time_var = tk.StringVar(value="-")
+        self.methane_var = tk.StringVar(value="-")
+        self.co_var = tk.StringVar(value="-")
+        self.lpg_var = tk.StringVar(value="-")
+        self.smoke_var = tk.StringVar(value="-")
+        self.air_quality_var = tk.StringVar(value="-")
+        self.danger_var = tk.StringVar(value="SAFE")
         self.connection_status = tk.StringVar(value="Disconnected")
         self.connection_color = tk.StringVar(value=self.colors['danger'])
         
         self.log = []
         self.alert_count = 0
+        self.danger_alerts = []
         self.temp_history = deque(maxlen=300)
         self.hum_history = deque(maxlen=300)
         self.index_history = deque(maxlen=300)
@@ -360,6 +367,16 @@ class ModernBossMonitorGUI:
         # Alert counter card
         self.alert_counter_var = tk.StringVar(value="0")
         self.create_metric_card(status_frame, "🚨 Total Alerts", self.alert_counter_var, row=5)
+        
+        # Gas sensor cards
+        self.create_metric_card(status_frame, "⛽ Methane (ppm)", self.methane_var, row=6)
+        self.create_metric_card(status_frame, "💨 CO (ppm)", self.co_var, row=7)
+        self.create_metric_card(status_frame, "🔥 LPG (ppm)", self.lpg_var, row=8)
+        self.create_metric_card(status_frame, "💭 Smoke (ppm)", self.smoke_var, row=9)
+        
+        # Air quality and danger cards
+        self.create_metric_card(status_frame, "🌬️ Air Quality", self.air_quality_var, row=10, unit="%")
+        self.create_danger_card(status_frame, "⚠️ Danger Level", self.danger_var, row=11)
 
     def create_status_card(self, parent, title, variable, style, row):
         """Create a main status card"""
@@ -417,6 +434,44 @@ class ModernBossMonitorGUI:
                                  bg=self.colors['bg_card'],
                                  fg=self.colors['text_secondary'])
             unit_label.grid(row=1, column=1, sticky="e", padx=20, pady=(0, 15))
+
+    def create_danger_card(self, parent, title, variable, row):
+        """Create a danger level card with color coding"""
+        card = tk.Frame(parent, bg=self.colors['bg_card'], relief='flat', bd=0)
+        card.grid(row=row, column=0, sticky="ew", pady=(0, 15))
+        card.grid_columnconfigure(1, column=1, weight=1)
+        
+        # Title
+        tk.Label(card, 
+                text=title, 
+                font=("Segoe UI", 12),
+                bg=self.colors['bg_card'],
+                fg=self.colors['text_secondary']).grid(row=0, column=0, sticky="w", padx=20, pady=(15, 5))
+        
+        # Value with dynamic color based on danger level
+        self.danger_value_label = tk.Label(card, 
+                                          textvariable=variable,
+                                          font=("Segoe UI", 16, "bold"),
+                                          bg=self.colors['bg_card'],
+                                          fg=self.colors['success'])
+        self.danger_value_label.grid(row=0, column=1, sticky="e", padx=20, pady=(15, 5))
+        
+        # Update danger color based on value
+        self.update_danger_color()
+    
+    def update_danger_color(self):
+        """Update danger level color based on current value"""
+        try:
+            if hasattr(self, 'danger_value_label'):
+                danger_level = self.danger_var.get()
+                if danger_level == 'CRITICAL':
+                    self.danger_value_label.configure(fg=self.colors['danger'])
+                elif danger_level == 'WARNING':
+                    self.danger_value_label.configure(fg=self.colors['warning'])
+                else:
+                    self.danger_value_label.configure(fg=self.colors['success'])
+        except Exception:
+            pass
 
     def create_log_panel(self, parent):
         """Create the right panel with log and controls"""
@@ -574,13 +629,20 @@ class ModernBossMonitorGUI:
 
     def process_message(self, msg):
         """Process incoming messages and update GUI"""
-        # Example message: DROWSY,GPS:(12.345678,98.765432),TEMP:25.1,HUM:60.2,TIME:12:34:56
+        # Enhanced message format: STATUS,GPS:(lat,lon),TEMP:xx.x,HUM:xx.x,METHANE:xx.x,CO:xx.x,LPG:xx.x,SMOKE:xx.x,AIR_QUALITY:xx.x,DANGER:LEVEL,REASONS:xxx,TIME:HH:MM:SS
         import csv
         parts = msg.split(',')
         status = parts[0] if parts else "Unknown"
         gps = "-"
         temp = "-"
         hum = "-"
+        methane = "-"
+        co = "-"
+        lpg = "-"
+        smoke = "-"
+        air_quality = "-"
+        danger = "SAFE"
+        reasons = "-"
         t = datetime.now().strftime('%H:%M:%S')
         
         for p in parts:
@@ -590,6 +652,20 @@ class ModernBossMonitorGUI:
                 temp = p[5:]
             elif p.startswith("HUM:"):
                 hum = p[4:]
+            elif p.startswith("METHANE:"):
+                methane = p[8:]
+            elif p.startswith("CO:"):
+                co = p[3:]
+            elif p.startswith("LPG:"):
+                lpg = p[4:]
+            elif p.startswith("SMOKE:"):
+                smoke = p[6:]
+            elif p.startswith("AIR_QUALITY:"):
+                air_quality = p[12:]
+            elif p.startswith("DANGER:"):
+                danger = p[7:]
+            elif p.startswith("REASONS:"):
+                reasons = p[8:]
             elif p.startswith("TIME:"):
                 t = p[5:]
         
@@ -598,7 +674,102 @@ class ModernBossMonitorGUI:
         self.gps_var.set(gps)
         self.temp_var.set(temp)
         self.hum_var.set(hum)
+        self.methane_var.set(methane)
+        self.co_var.set(co)
+        self.lpg_var.set(lpg)
+        self.smoke_var.set(smoke)
+        self.air_quality_var.set(air_quality)
+        self.danger_var.set(danger)
         self.time_var.set(t)
+        
+        # Update danger color
+        self.update_danger_color()
+        
+        # Check for dangerous conditions and create alerts
+        if danger != "SAFE":
+            self.create_danger_alert(danger, reasons, methane, co, lpg, smoke)
+    
+    def create_danger_alert(self, danger_level, reasons, methane, co, lpg, smoke):
+        """Create and display danger alerts"""
+        try:
+            # Create alert message
+            alert_msg = f"🚨 {danger_level} ALERT: "
+            if 'HIGH_METHANE' in reasons:
+                alert_msg += f"Methane: {methane} ppm (EXPLOSIVE RISK!) "
+            if 'HIGH_CO' in reasons:
+                alert_msg += f"CO: {co} ppm (POISONOUS!) "
+            if 'HIGH_LPG' in reasons:
+                alert_msg += f"LPG: {lpg} ppm (EXPLOSIVE RISK!) "
+            if 'SMOKE_DETECTED' in reasons:
+                alert_msg += f"Smoke: {smoke} ppm (FIRE RISK!) "
+            
+            # Add to danger alerts list
+            timestamp = datetime.now().strftime('%H:%M:%S')
+            self.danger_alerts.append(f"[{timestamp}] {alert_msg}")
+            
+            # Keep only last 50 alerts
+            if len(self.danger_alerts) > 50:
+                self.danger_alerts.pop(0)
+            
+            # Show popup for critical alerts
+            if danger_level == "CRITICAL":
+                self.show_critical_alert_popup(alert_msg)
+            
+            # Log to console
+            print(f"⚠️ {alert_msg}")
+            
+        except Exception as e:
+            print(f"Error creating danger alert: {e}")
+    
+    def show_critical_alert_popup(self, alert_msg):
+        """Show critical alert popup with sound"""
+        try:
+            # Create popup window
+            popup = tk.Toplevel(self.master)
+            popup.title("🚨 CRITICAL ALERT")
+            popup.geometry("500x300")
+            popup.configure(bg=self.colors['danger'])
+            popup.attributes('-topmost', True)
+            
+            # Center popup
+            popup.geometry("+%d+%d" % (self.master.winfo_rootx() + 200, self.master.winfo_rooty() + 200))
+            
+            # Alert content
+            tk.Label(popup, 
+                    text="🚨 CRITICAL ALERT 🚨", 
+                    font=("Segoe UI", 20, "bold"),
+                    bg=self.colors['danger'],
+                    fg="white").pack(pady=20)
+            
+            tk.Label(popup, 
+                    text=alert_msg, 
+                    font=("Segoe UI", 14),
+                    bg=self.colors['danger'],
+                    fg="white",
+                    wraplength=450).pack(pady=20)
+            
+            tk.Label(popup, 
+                    text="IMMEDIATE ACTION REQUIRED!", 
+                    font=("Segoe UI", 16, "bold"),
+                    bg=self.colors['danger'],
+                    fg="yellow").pack(pady=20)
+            
+            # Acknowledge button
+            tk.Button(popup, 
+                     text="ACKNOWLEDGE", 
+                     command=popup.destroy,
+                     font=("Segoe UI", 14, "bold"),
+                     bg="white",
+                     fg=self.colors['danger'],
+                     relief='flat',
+                     padx=30,
+                     pady=10).pack(pady=20)
+            
+            # Auto-close after 30 seconds
+            popup.after(30000, popup.destroy)
+            
+        except Exception as e:
+            print(f"Error showing critical alert popup: {e}")
         
         # Update alert counter
         self.alert_count += 1

@@ -56,6 +56,18 @@ except ImportError:
     adafruit_dht = None
     DHT_LIB_AVAILABLE = False
 
+# ADS1115 support for MQ sensors
+try:
+    import busio
+    from adafruit_ads1x15.ads1115 import ADS1115
+    from adafruit_ads1x15.analog_in import AnalogIn
+    ADS1115_LIB_AVAILABLE = True
+except ImportError:
+    busio = None
+    ADS1115 = None
+    AnalogIn = None
+    ADS1115_LIB_AVAILABLE = False
+
 try:
     from smbus2 import SMBus
     I2C_AVAILABLE = True
@@ -163,7 +175,7 @@ class PerformanceMonitor:
         return self.fps
 
 class SensorData:
-    """Thread-safe sensor data container"""
+    """Thread-safe sensor data container with enhanced environmental monitoring"""
     
     def __init__(self):
         self.lock = threading.Lock()
@@ -174,9 +186,27 @@ class SensorData:
             'gyro_x': 0, 'gyro_y': 0, 'gyro_z': 0,
             'lat': 0, 'lon': 0,
             'gas_detected': None,
-            'gas_percent': 0
+            'gas_percent': 0,
+            'methane_level': 0,      # Methane concentration in ppm
+            'air_quality': 100,      # Air quality index (0-100, 100=excellent)
+            'co_level': 0,           # Carbon monoxide level
+            'lpg_level': 0,          # LPG/Propane level
+            'smoke_level': 0,        # Smoke level
+            'danger_level': 'SAFE'   # Overall danger assessment
         }
         self.gyro_zero = {'x': 0, 'y': 0, 'z': 0}
+        
+        # Danger thresholds for mining environment
+        self.danger_thresholds = {
+            'methane': 1000,     # 1000 ppm - Lower Explosive Limit (LEL) is 5%
+            'co': 50,            # 50 ppm - OSHA limit
+            'lpg': 1000,         # 1000 ppm - LEL threshold
+            'smoke': 500,        # 500 ppm - Smoke detection threshold
+            'temp_high': 35,     # 35°C - Heat stress threshold
+            'temp_low': 5,       # 5°C - Cold stress threshold
+            'humidity_high': 80, # 80% - High humidity threshold
+            'humidity_low': 20   # 20% - Low humidity threshold
+        }
     
     def update(self, **kwargs):
         with self.lock:
@@ -185,6 +215,54 @@ class SensorData:
     def get_data(self):
         with self.lock:
             return self.data.copy()
+    
+    def assess_danger(self):
+        """Assess overall danger level based on all sensor readings"""
+        with self.lock:
+            danger_level = 'SAFE'
+            danger_reasons = []
+            
+            # Check methane levels
+            if self.data['methane_level'] > self.danger_thresholds['methane']:
+                danger_level = 'CRITICAL'
+                danger_reasons.append('HIGH_METHANE')
+            
+            # Check CO levels
+            if self.data['co_level'] > self.danger_thresholds['co']:
+                danger_level = 'CRITICAL'
+                danger_reasons.append('HIGH_CO')
+            
+            # Check LPG levels
+            if self.data['lpg_level'] > self.danger_thresholds['lpg']:
+                danger_level = 'CRITICAL'
+                danger_reasons.append('HIGH_LPG')
+            
+            # Check smoke levels
+            if self.data['smoke_level'] > self.danger_thresholds['smoke']:
+                danger_level = 'WARNING'
+                danger_reasons.append('SMOKE_DETECTED')
+            
+            # Check temperature extremes
+            if self.data['temperature'] > self.danger_thresholds['temp_high']:
+                danger_level = 'WARNING'
+                danger_reasons.append('HIGH_TEMP')
+            elif self.data['temperature'] < self.danger_thresholds['temp_low']:
+                danger_level = 'WARNING'
+                danger_reasons.append('LOW_TEMP')
+            
+            # Check humidity extremes
+            if self.data['humidity'] > self.danger_thresholds['humidity_high']:
+                danger_level = 'WARNING'
+                danger_reasons.append('HIGH_HUMIDITY')
+            elif self.data['humidity'] < self.danger_thresholds['humidity_low']:
+                danger_level = 'WARNING'
+                danger_reasons.append('LOW_HUMIDITY')
+            
+            # Update danger level and reasons
+            self.data['danger_level'] = danger_level
+            self.data['danger_reasons'] = danger_reasons
+            
+            return danger_level, danger_reasons
     
     def calibrate_gyro(self):
         with self.lock:
@@ -203,6 +281,179 @@ class SensorData:
 # =============================================================================
 # SENSOR CLASSES
 # =============================================================================
+
+class MQSensor:
+    """MQ series gas sensors using ADS1115 ADC for methane, CO, LPG, and smoke detection"""
+    
+    def __init__(self, sensor_data):
+        self.sensor_data = sensor_data
+        self.running = False
+        self.thread = None
+        self.baseline_mq9 = None
+        self.baseline_mq = None
+        self.calibrated = False
+        
+        # MQ sensor calibration values (adjust based on your sensor)
+        self.mq9_calibration = {
+            'methane_ratio': 1.0,    # MQ-9 methane sensitivity
+            'co_ratio': 0.8,         # MQ-9 CO sensitivity
+        }
+        
+        self.mq_calibration = {
+            'lpg_ratio': 1.2,        # MQ-2/4 LPG sensitivity
+            'smoke_ratio': 1.0,      # MQ-2/4 smoke sensitivity
+            'methane_ratio': 0.9,    # MQ-2/4 methane sensitivity
+        }
+        
+        # Initialize ADS1115 for MQ sensors
+        self.ads = None
+        self.mq9_channel = None
+        self.mq_channel = None
+        
+        if ADS1115_LIB_AVAILABLE:
+            try:
+                # Initialize I2C bus and ADS1115
+                i2c = busio.I2C(board.SCL, board.SDA)
+                self.ads = ADS1115(i2c)
+                
+                # MQ sensors connected to A0 and A1
+                self.mq9_channel = AnalogIn(self.ads, 0)  # A0 - MQ9 (methane/CO)
+                self.mq_channel = AnalogIn(self.ads, 1)   # A1 - MQ (LPG/smoke/methane)
+                
+                print("MQ sensors ADS1115 initialized successfully")
+                print(f"MQ9 (A0) - Methane/CO detection")
+                print(f"MQ (A1) - LPG/Smoke/Methane detection")
+                
+            except Exception as e:
+                print(f"MQ sensors ADS1115 initialization failed: {e}")
+                self.ads = None
+        else:
+            print("ADS1115 libraries not available. MQ sensors will not work.")
+            print("Please install: pip install adafruit-circuitpython-ads1x15 adafruit-blinka")
+    
+    def read_mq_sensor(self):
+        """Read MQ sensor values from ADS1115 and convert to gas concentrations"""
+        if not self.ads or not self.mq9_channel or not self.mq_channel:
+            return
+        
+        try:
+            # Read voltages from both MQ sensors
+            mq9_voltage = self.mq9_channel.voltage  # A0 - MQ9 (methane/CO)
+            mq_voltage = self.mq_channel.voltage    # A1 - MQ (LPG/smoke/methane)
+            
+            # Calculate gas concentrations using calibration ratios
+            # MQ9 sensor (A0) - primarily methane and CO
+            methane_ppm_mq9 = max(0, (mq9_voltage - 0.1) * self.mq9_calibration['methane_ratio'] * 1000)
+            co_ppm_mq9 = max(0, (mq9_voltage - 0.1) * self.mq9_calibration['co_ratio'] * 500)
+            
+            # MQ sensor (A1) - LPG, smoke, and methane
+            lpg_ppm = max(0, (mq_voltage - 0.1) * self.mq_calibration['lpg_ratio'] * 1000)
+            smoke_ppm = max(0, (mq_voltage - 0.1) * self.mq_calibration['smoke_ratio'] * 1000)
+            methane_ppm_mq = max(0, (mq_voltage - 0.1) * self.mq_calibration['methane_ratio'] * 1000)
+            
+            # Combine methane readings from both sensors (weighted average)
+            methane_ppm = (methane_ppm_mq9 * 0.7 + methane_ppm_mq * 0.3)  # MQ9 more reliable for methane
+            
+            # Calculate air quality index (0-100, 100=excellent)
+            air_quality = max(0, 100 - (methane_ppm / 10) - (co_ppm_mq9 / 5) - (lpg_ppm / 10) - (smoke_ppm / 10))
+            air_quality = min(100, air_quality)
+            
+            # Update sensor data
+            self.sensor_data.update(
+                methane_level=methane_ppm,
+                co_level=co_ppm_mq9,
+                lpg_level=lpg_ppm,
+                smoke_level=smoke_ppm,
+                air_quality=air_quality,
+                gas_percent=(mq9_voltage + mq_voltage) * 10  # Combined voltage percentage
+            )
+            
+            # Assess danger level
+            danger_level, danger_reasons = self.sensor_data.assess_danger()
+            
+            # Log dangerous conditions
+            if danger_level != 'SAFE':
+                print(f"⚠️ DANGER DETECTED: {danger_level} - {danger_reasons}")
+                if 'HIGH_METHANE' in danger_reasons:
+                    print(f"🚨 CRITICAL: Methane level {methane_ppm:.1f} ppm exceeds safety limit!")
+                if 'HIGH_CO' in danger_reasons:
+                    print(f"🚨 CRITICAL: CO level {co_ppm_mq9:.1f} ppm exceeds safety limit!")
+                if 'HIGH_LPG' in danger_reasons:
+                    print(f"🚨 CRITICAL: LPG level {lpg_ppm:.1f} ppm exceeds safety limit!")
+            
+            # Debug output (can be disabled in production)
+            print(f"MQ9 (A0): {mq9_voltage:.3f}V → Methane: {methane_ppm_mq9:.1f}ppm, CO: {co_ppm_mq9:.1f}ppm")
+            print(f"MQ (A1): {mq_voltage:.3f}V → LPG: {lpg_ppm:.1f}ppm, Smoke: {smoke_ppm:.1f}ppm, Methane: {methane_ppm_mq:.1f}ppm")
+            
+        except Exception as e:
+            print(f"MQ sensor read error: {e}")
+    
+    def calibrate(self):
+        """Calibrate both MQ sensors baseline in clean air"""
+        if not self.ads or not self.mq9_channel or not self.mq_channel:
+            return
+        
+        print("Calibrating MQ sensors in clean air...")
+        print("Please ensure clean air environment for accurate calibration...")
+        
+        mq9_samples = []
+        mq_samples = []
+        
+        for i in range(10):
+            try:
+                mq9_voltage = self.mq9_channel.voltage
+                mq_voltage = self.mq_channel.voltage
+                
+                mq9_samples.append(mq9_voltage)
+                mq_samples.append(mq_voltage)
+                
+                print(f"Calibration sample {i+1}/10: MQ9={mq9_voltage:.3f}V, MQ={mq_voltage:.3f}V")
+                time.sleep(0.5)
+                
+            except Exception as e:
+                print(f"Calibration error: {e}")
+        
+        if mq9_samples and mq_samples:
+            self.baseline_mq9 = sum(mq9_samples) / len(mq9_samples)
+            self.baseline_mq = sum(mq_samples) / len(mq_samples)
+            self.calibrated = True
+            
+            print(f"MQ sensors calibrated successfully!")
+            print(f"MQ9 (A0) baseline: {self.baseline_mq9:.3f}V")
+            print(f"MQ (A1) baseline: {self.baseline_mq:.3f}V")
+            print("Calibration complete. Monitoring active.")
+    
+    def start(self):
+        """Start MQ sensor monitoring thread"""
+        if not self.spi:
+            print("MQ sensor not available")
+            return
+        
+        self.running = True
+        self.thread = threading.Thread(target=self._sensor_loop, daemon=True)
+        self.thread.start()
+        
+        # Initial calibration
+        self.calibrate()
+    
+    def stop(self):
+        """Stop MQ sensor monitoring"""
+        self.running = False
+        if self.thread:
+            self.thread.join(timeout=1)
+        if self.ads:
+            try:
+                self.ads = None
+                self.mq9_channel = None
+                self.mq_channel = None
+            except Exception:
+                pass
+    
+    def _sensor_loop(self):
+        """Main MQ sensor reading loop"""
+        while self.running:
+            self.read_mq_sensor()
+            time.sleep(1.0)  # Read every second
 
 class MPU6050Sensor:
     """MPU6050 accelerometer and gyroscope sensor"""
@@ -755,6 +1006,7 @@ class HelmetSafetySystem:
         self.mpu6050 = MPU6050Sensor(self.sensor_data)
         self.dht = DHTSensor(self.sensor_data)
         self.gps = GPSSensor(self.sensor_data)
+        self.mq_sensor = MQSensor(self.sensor_data)
         
         # Initialize GPIO
         self.setup_gpio()
@@ -852,6 +1104,9 @@ class HelmetSafetySystem:
         
         if Config.ENABLE_GPS:
             self.gps.start()
+        
+        if Config.ENABLE_MQ_SENSOR:
+            self.mq_sensor.start()
         
         print("System initialization complete")
         return True
@@ -1052,12 +1307,22 @@ class HelmetSafetySystem:
                 if now - self.last_send_time >= 1.0:  # send once per second
                     data = self.sensor_data.get_data()
                     drowsy_status = 'DROWSY' if 'drowsy' in locals() and drowsy else 'AWAKE'
-                    # Compose message expected by boss monitor
+                    # Assess current danger level
+                    danger_level, danger_reasons = self.sensor_data.assess_danger()
+                    
+                    # Compose comprehensive message for boss monitor
                     message = (
                         f"{drowsy_status},"
                         f"GPS:({data.get('lat', 0):.6f},{data.get('lon', 0):.6f}),"
                         f"TEMP:{(data.get('temperature') if data.get('temperature') is not None else 0):.1f},"
                         f"HUM:{(data.get('humidity') if data.get('humidity') is not None else 0):.1f},"
+                        f"METHANE:{data.get('methane_level', 0):.1f},"
+                        f"CO:{data.get('co_level', 0):.1f},"
+                        f"LPG:{data.get('lpg_level', 0):.1f},"
+                        f"SMOKE:{data.get('smoke_level', 0):.1f},"
+                        f"AIR_QUALITY:{data.get('air_quality', 100):.1f},"
+                        f"DANGER:{danger_level},"
+                        f"REASONS:{','.join(danger_reasons) if danger_reasons else 'NONE'},"
                         f"TIME:{datetime.now().strftime('%H:%M:%S')}\n"
                     )
                     if not self.hc12.connected:
@@ -1071,20 +1336,7 @@ class HelmetSafetySystem:
                         if int(now) % 5 == 0:
                             print("HC-12: send failed or not connected")
 
-                # Optional: MQ sensor logic and heartbeat blink
-                if Config.ENABLE_MQ_SENSOR:
-                    mq_voltage = data.get('gas_percent', 0)
-                    if self.mq_baseline is not None:
-                        if mq_voltage > self.mq_baseline + self.mq_threshold:
-                            print(
-                                f"Gas detected! MQ voltage: {mq_voltage:.2f} V "
-                                f"(baseline: {self.mq_baseline:.2f} V)"
-                            )
-                        else:
-                            print(
-                                f"No gas detected. MQ voltage: {mq_voltage:.2f} V "
-                                f"(baseline: {self.mq_baseline:.2f} V)"
-                            )
+                # Heartbeat blink LED
                 if GPIO_AVAILABLE:
                     if now - self.last_blink_time > 5:
                         GPIO.output(self.blink_pin, GPIO.HIGH)
@@ -1108,6 +1360,7 @@ class HelmetSafetySystem:
         self.mpu6050.stop()
         self.dht.stop()
         self.gps.stop()
+        self.mq_sensor.stop()
         
         # Clean up hardware
         if GPIO_AVAILABLE:
