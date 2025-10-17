@@ -2,11 +2,13 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import serial
 import serial.tools.list_ports
+from serial.serialutil import SerialException
 import threading
 import time
 from datetime import datetime
 import math
 from collections import deque
+import csv
 try:
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
     from matplotlib.figure import Figure
@@ -59,7 +61,21 @@ class ModernBossMonitorGUI:
         # Configure modern styling
         self.setup_styles()
         
-        # Variables
+        # Current state variables
+        self._status = "Unknown"
+        self._gps = "-"
+        self._temp = "-"
+        self._hum = "-"
+        self._time = "-"
+        self._methane = "-"
+        self._co = "-"
+        self._lpg = "-"
+        self._smoke = "-"
+        self._air_quality = "-"
+        self._danger = "SAFE"
+        self._reasons = "-"
+
+        # GUI Variables
         self.status_var = tk.StringVar(value="Waiting for data...")
         self.gps_var = tk.StringVar(value="-")
         self.temp_var = tk.StringVar(value="-")
@@ -74,6 +90,7 @@ class ModernBossMonitorGUI:
         self.connection_status = tk.StringVar(value="Disconnected")
         self.connection_color = tk.StringVar(value=self.colors['danger'])
         
+        # Variables for data history and plotting
         self.log = []
         self.alert_count = 0
         self.danger_alerts = []
@@ -81,6 +98,14 @@ class ModernBossMonitorGUI:
         self.hum_history = deque(maxlen=300)
         self.index_history = deque(maxlen=300)
         self.sample_index = 0
+        
+        # Matplotlib objects initialization
+        if MATPLOTLIB_AVAILABLE:
+            self.ax_temp = None
+            self.ax_hum = None
+            self.temp_line = None
+            self.hum_line = None
+            self.canvas = None
         
         # Create main container
         self.create_main_layout()
@@ -97,12 +122,62 @@ class ModernBossMonitorGUI:
     def get_available_ports(self):
         """Get list of available serial ports"""
         try:
-            ports = [port.device for port in serial.tools.list_ports.comports()]
-            print(f"Available ports: {ports}")
+            # List all ports including details
+            all_ports = list(serial.tools.list_ports.comports())
+            ports = []
+            for port in all_ports:
+                # Print detailed port information for debugging
+                print(f"Found port: {port.device}")
+                print(f"   Description: {port.description}")
+                print(f"   Hardware ID: {port.hwid}")
+                ports.append(port.device)
+            
+            if not ports:
+                print("No serial ports found. Please connect your HC-12 module.")
+            else:
+                print(f"Available ports: {ports}")
             return ports
         except Exception as e:
             print(f"Error getting ports: {e}")
             return []
+
+    def check_port_permissions(self, port):
+        """Check if we have permission to access the port"""
+        import os
+        import stat
+        
+        try:
+            # Check if port exists
+            if not os.path.exists(port):
+                print(f"Port {port} does not exist")
+                return False
+                
+            # Get port stats
+            st = os.stat(port)
+            
+            # Check if current user has read/write permission
+            has_rw = bool(st.st_mode & stat.S_IRUSR) and bool(st.st_mode & stat.S_IWUSR)
+            
+            # Check if current user is in the dialout group (Linux)
+            import grp
+            import pwd
+            username = pwd.getpwuid(os.getuid())[0]
+            groups = [g.gr_name for g in grp.getgrall() if username in g.gr_mem]
+            
+            if 'dialout' in groups:
+                print(f"User {username} is in dialout group")
+                return True
+                
+            if has_rw:
+                print(f"User has direct read/write permission to {port}")
+                return True
+            
+            print(f"Permission denied for {port}. Add user to dialout group or run with sudo")
+            return False
+            
+        except Exception as e:
+            print(f"Error checking permissions: {e}")
+            return False
 
     def auto_connect(self):
         """Try to connect to HC-12 automatically"""
@@ -111,78 +186,160 @@ class ModernBossMonitorGUI:
             return
             
         # Try common HC-12 ports
-        common_ports = ['/dev/ttyUSB0', '/dev/ttyUSB1', '/dev/ttyACM0', '/dev/ttyACM1', 'COM1', 'COM2', 'COM3']
+        common_ports = [
+            '/dev/ttyUSB0',  # Common USB-Serial adapter
+            '/dev/ttyUSB1',
+            '/dev/ttyACM0',  # Arduino-style USB
+            '/dev/ttyACM1',
+            '/dev/ttyS0',    # Hardware serial ports
+            '/dev/ttyS1',
+            'COM1', 'COM2', 'COM3'  # Windows ports
+        ]
         
+        # First try USB devices
+        usb_ports = [port for port in self.available_ports if 'USB' in port.upper()]
+        for port in usb_ports:
+            print(f"Trying USB port: {port}")
+            if self.check_port_permissions(port) and self.try_connect(port):
+                self.start_connection_thread()
+                return
+                
+        # Then try common ports
         for port in common_ports:
             if port in self.available_ports:
-                if self.try_connect(port):
-                    # Start connection thread immediately after auto-selecting a port
+                print(f"Trying common port: {port}")
+                if self.check_port_permissions(port) and self.try_connect(port):
                     self.start_connection_thread()
                     return
         
-        # If no common ports work, show port selection
+        # If no ports work, show port selection
         self.show_port_selection_dialog()
 
     def try_connect(self, port):
         """Try to connect to a specific port"""
         try:
-            test_ser = serial.Serial(port, HC12_BAUDRATE, timeout=1)
+            # First check if port exists
+            if not port in [p.device for p in serial.tools.list_ports.comports()]:
+                print(f"Port {port} not found in system")
+                return False
+                
+            # Try to open the port
+            test_ser = serial.Serial(port=port, baudrate=HC12_BAUDRATE, timeout=1)
+            
+            # Try to write and read from port to verify it's working
+            try:
+                test_ser.write(b'AT\r\n')
+                time.sleep(0.1)
+                response = test_ser.read(test_ser.in_waiting or 1)
+                print(f"Port response: {response}")
+            except Exception as e:
+                print(f"Port write/read test failed: {e}")
+                # Continue anyway as some HC-12 modules might not respond to AT commands
+            
             test_ser.close()
             global HC12_PORT
             HC12_PORT = port
-            print(f"Auto-connected to {port}")
+            print(f"Successfully connected to {port}")
+            
             # Update status label preview
             try:
                 self.port_label.configure(text=f"Port: {HC12_PORT}")
             except Exception:
                 pass
             return True
+            
+        except SerialException as se:
+            print(f"Serial error on {port}: {se}")
+            if "Permission denied" in str(se):
+                print("Permission denied. Try running with sudo or add user to dialout group")
+            elif "Device or resource busy" in str(se):
+                print("Port is busy. Make sure no other program is using it")
+            return False
         except Exception as e:
             print(f"Failed to connect to {port}: {e}")
             return False
 
     def show_port_selection_dialog(self):
         """Show dialog to select port manually"""
+        # Refresh available ports
+        self.available_ports = self.get_available_ports()
+        
         if not self.available_ports:
-            messagebox.showerror("No Ports Available", 
-                               "No serial ports found. Please connect your HC-12 module and restart the application.")
+            response = messagebox.askretrycancel(
+                "No Ports Available", 
+                "No serial ports found. Please:\n\n" +
+                "1. Check if the HC-12 module is connected\n" +
+                "2. Check if you have permissions to access the port\n" +
+                "3. Try disconnecting and reconnecting the module\n\n" +
+                "Would you like to retry scanning for ports?")
+            if response:
+                self.show_port_selection_dialog()
             return
             
         # Create port selection dialog
         dialog = tk.Toplevel(self.master)
         dialog.title("Select HC-12 Port")
-        dialog.geometry("400x300")
+        dialog.geometry("500x400")
         dialog.configure(bg=self.colors['bg_dark'])
         dialog.transient(self.master)
         dialog.grab_set()
         
         # Center the dialog
-        dialog.geometry("+%d+%d" % (self.master.winfo_rootx() + 100, self.master.winfo_rooty() + 100))
+        dialog.geometry("+%d+%d" % (
+            self.master.winfo_rootx() + (self.master.winfo_width() - 500) // 2,
+            self.master.winfo_rooty() + (self.master.winfo_height() - 400) // 2
+        ))
         
-        # Content
+        # Instructions
         tk.Label(dialog, 
-                text="Select HC-12 Port:", 
-                font=("Segoe UI", 14, "bold"),
+                text="Select HC-12 Module Port", 
+                font=("Segoe UI", 16, "bold"),
                 bg=self.colors['bg_dark'],
-                fg=self.colors['text_primary']).pack(pady=20)
+                fg=self.colors['text_primary']).pack(pady=(20, 5))
+                
+        tk.Label(dialog,
+                text="The HC-12 module typically appears as a USB-to-Serial device",
+                font=("Segoe UI", 10),
+                bg=self.colors['bg_dark'],
+                fg=self.colors['text_secondary']).pack(pady=(0, 20))
         
-        # Port listbox
+        # Port listbox with scrollbar
         port_frame = tk.Frame(dialog, bg=self.colors['bg_dark'])
         port_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
         
+        # Add scrollbar
+        scrollbar = tk.Scrollbar(port_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Port listbox with port details
         port_listbox = tk.Listbox(port_frame, 
                                  bg=self.colors['bg_card'],
                                  fg=self.colors['text_primary'],
-                                 font=("Segoe UI", 12),
-                                 selectmode=tk.SINGLE)
+                                 font=("Segoe UI", 11),
+                                 selectmode=tk.SINGLE,
+                                 yscrollcommand=scrollbar.set)
         port_listbox.pack(fill=tk.BOTH, expand=True)
         
-        # Populate with available ports
-        for port in self.available_ports:
-            port_listbox.insert(tk.END, port)
+        scrollbar.config(command=port_listbox.yview)
         
-        if self.available_ports:
+        # Populate with available ports and their descriptions
+        all_ports = list(serial.tools.list_ports.comports())
+        for port in all_ports:
+            description = f"{port.device} - {port.description}"
+            if "USB" in port.description.upper():
+                description += " (Recommended)"
+            port_listbox.insert(tk.END, description)
+        
+        if all_ports:
             port_listbox.selection_set(0)
+            
+        # Status label
+        self.port_status_label = tk.Label(dialog,
+                                        text="",
+                                        font=("Segoe UI", 10),
+                                        bg=self.colors['bg_dark'],
+                                        fg=self.colors['text_secondary'])
+        self.port_status_label.pack(pady=5)
         
         # Buttons
         button_frame = tk.Frame(dialog, bg=self.colors['bg_dark'])
@@ -191,21 +348,33 @@ class ModernBossMonitorGUI:
         def connect_selected():
             selection = port_listbox.curselection()
             if selection:
-                selected_port = port_listbox.get(selection[0])
-                global HC12_PORT
-                HC12_PORT = selected_port
-                print(f"Selected port: {HC12_PORT}")
-                dialog.destroy()
-                # Start connection thread
-                self.start_connection_thread()
+                # Extract port name from the description
+                selected_text = port_listbox.get(selection[0])
+                selected_port = selected_text.split(" - ")[0].strip()
+                
+                # Try to connect
+                if self.try_connect(selected_port):
+                    global HC12_PORT
+                    HC12_PORT = selected_port
+                    print(f"Successfully connected to {HC12_PORT}")
+                    dialog.destroy()
+                    # Start connection thread
+                    self.start_connection_thread()
+                else:
+                    self.port_status_label.configure(
+                        text=f"Failed to connect to {selected_port}. Please try another port.",
+                        fg=self.colors['danger'])
             else:
-                messagebox.showwarning("No Port Selected", "Please select a port from the list.")
+                self.port_status_label.configure(
+                    text="Please select a port from the list.",
+                    fg=self.colors['warning'])
         
         def refresh_ports():
-            dialog.destroy()
-            self.available_ports = self.get_available_ports()
-            self.show_port_selection_dialog()
+            self.port_status_label.configure(text="Scanning for ports...", fg=self.colors['primary'])
+            dialog.update()
+            dialog.after(100, lambda: dialog.destroy() and self.show_port_selection_dialog())
         
+        # Connect button
         tk.Button(button_frame, 
                  text="Connect", 
                  command=connect_selected,
@@ -213,11 +382,12 @@ class ModernBossMonitorGUI:
                  fg=self.colors['text_primary'],
                  font=("Segoe UI", 11, "bold"),
                  relief='flat',
-                 padx=20,
+                 padx=30,
                  pady=10).pack(side=tk.LEFT, padx=(0, 10))
         
+        # Refresh button
         tk.Button(button_frame, 
-                 text="Refresh", 
+                 text="Refresh Ports", 
                  command=refresh_ports,
                  bg=self.colors['bg_accent'],
                  fg=self.colors['text_primary'],
@@ -226,6 +396,7 @@ class ModernBossMonitorGUI:
                  padx=20,
                  pady=10).pack(side=tk.LEFT, padx=(0, 10))
         
+        # Cancel button
         tk.Button(button_frame, 
                  text="Cancel", 
                  command=dialog.destroy,
@@ -235,6 +406,19 @@ class ModernBossMonitorGUI:
                  relief='flat',
                  padx=20,
                  pady=10).pack(side=tk.RIGHT)
+        
+        # Help text
+        help_text = ("Note: If you don't see your device, try:\n" +
+                    "1. Unplugging and replugging the HC-12 module\n" +
+                    "2. Clicking 'Refresh Ports'\n" +
+                    "3. Check system permissions for USB devices")
+        
+        tk.Label(dialog,
+                text=help_text,
+                font=("Segoe UI", 9),
+                bg=self.colors['bg_dark'],
+                fg=self.colors['text_secondary'],
+                justify=tk.LEFT).pack(padx=20, pady=(0, 10))
 
     def start_connection_thread(self):
         """Start the HC-12 connection thread"""
@@ -439,7 +623,7 @@ class ModernBossMonitorGUI:
         """Create a danger level card with color coding"""
         card = tk.Frame(parent, bg=self.colors['bg_card'], relief='flat', bd=0)
         card.grid(row=row, column=0, sticky="ew", pady=(0, 15))
-        card.grid_columnconfigure(1, column=1, weight=1)
+        card.grid_columnconfigure(1, weight=1)
         
         # Title
         tk.Label(card, 
@@ -595,10 +779,34 @@ class ModernBossMonitorGUI:
             return
             
         try:
-            self.serial_connection = serial.Serial(HC12_PORT, HC12_BAUDRATE, timeout=1)
+            # Try to open serial port
+            self.serial_connection = serial.Serial(
+                port=HC12_PORT,
+                baudrate=HC12_BAUDRATE,
+                timeout=1,
+                write_timeout=1
+            )
+            
+            # Set DTR and RTS to prepare for communication
+            self.serial_connection.dtr = False
+            self.serial_connection.rts = False
+            time.sleep(0.1)  # Wait for signals to settle
+            
             print(f"Connected to HC-12 on {HC12_PORT}")
             self.is_connected = True
             self.connection_status.set("Connected")
+            
+        except SerialException as se:
+            error_msg = f"HC-12 Error: {se}"
+            if "Permission denied" in str(se):
+                error_msg += "\nTry running with sudo or add user to dialout group"
+            elif "Device or resource busy" in str(se):
+                error_msg += "\nPort is busy. Make sure no other program is using it"
+            self.status_var.set(error_msg)
+            self.is_connected = False
+            self.connection_status.set("Disconnected")
+            print(error_msg)
+            return
         except Exception as e:
             error_msg = f"HC-12 Error: {e}"
             self.status_var.set(error_msg)
@@ -632,62 +840,121 @@ class ModernBossMonitorGUI:
         # Enhanced message format: STATUS,GPS:(lat,lon),TEMP:xx.x,HUM:xx.x,METHANE:xx.x,CO:xx.x,LPG:xx.x,SMOKE:xx.x,AIR_QUALITY:xx.x,DANGER:LEVEL,REASONS:xxx,TIME:HH:MM:SS
         import csv
         parts = msg.split(',')
-        status = parts[0] if parts else "Unknown"
-        gps = "-"
-        temp = "-"
-        hum = "-"
-        methane = "-"
-        co = "-"
-        lpg = "-"
-        smoke = "-"
-        air_quality = "-"
-        danger = "SAFE"
-        reasons = "-"
-        t = datetime.now().strftime('%H:%M:%S')
+        self._status = parts[0] if parts else "Unknown"
+        self._gps = "-"
+        self._temp = "-"
+        self._hum = "-"
+        self._methane = "-"
+        self._co = "-"
+        self._lpg = "-"
+        self._smoke = "-"
+        self._air_quality = "-"
+        self._danger = "SAFE"
+        self._reasons = "-"
+        self._time = datetime.now().strftime('%H:%M:%S')
         
         for p in parts:
             if p.startswith("GPS:"):
-                gps = p[4:]
+                self._gps = p[4:]
             elif p.startswith("TEMP:"):
-                temp = p[5:]
+                self._temp = p[5:]
             elif p.startswith("HUM:"):
-                hum = p[4:]
+                self._hum = p[4:]
             elif p.startswith("METHANE:"):
-                methane = p[8:]
+                self._methane = p[8:]
             elif p.startswith("CO:"):
-                co = p[3:]
+                self._co = p[3:]
             elif p.startswith("LPG:"):
-                lpg = p[4:]
+                self._lpg = p[4:]
             elif p.startswith("SMOKE:"):
-                smoke = p[6:]
+                self._smoke = p[6:]
             elif p.startswith("AIR_QUALITY:"):
-                air_quality = p[12:]
+                self._air_quality = p[12:]
             elif p.startswith("DANGER:"):
-                danger = p[7:]
+                self._danger = p[7:]
             elif p.startswith("REASONS:"):
-                reasons = p[8:]
+                self._reasons = p[8:]
             elif p.startswith("TIME:"):
-                t = p[5:]
+                self._time = p[5:]
         
         # Update GUI variables
-        self.status_var.set(status)
-        self.gps_var.set(gps)
-        self.temp_var.set(temp)
-        self.hum_var.set(hum)
-        self.methane_var.set(methane)
-        self.co_var.set(co)
-        self.lpg_var.set(lpg)
-        self.smoke_var.set(smoke)
-        self.air_quality_var.set(air_quality)
-        self.danger_var.set(danger)
-        self.time_var.set(t)
+        self.status_var.set(self._status)
+        self.gps_var.set(self._gps)
+        self.temp_var.set(self._temp)
+        self.hum_var.set(self._hum)
+        self.methane_var.set(self._methane)
+        self.co_var.set(self._co)
+        self.lpg_var.set(self._lpg)
+        self.smoke_var.set(self._smoke)
+        self.air_quality_var.set(self._air_quality)
+        self.danger_var.set(self._danger)
+        self.time_var.set(self._time)
         
         # Update danger color
         self.update_danger_color()
         
+        # Update status color based on worker status
+        try:
+            if hasattr(self, 'status_value_label'):
+                if 'DROWSY' in self._status or 'NO_FACE' in self._status or 'ALERT' in self._status:
+                    self.status_value_label.configure(fg=self.colors['danger'])
+                elif 'AWAKE' in self._status or 'FACE' in self._status:
+                    self.status_value_label.configure(fg=self.colors['success'])
+                else:
+                    self.status_value_label.configure(fg=self.colors['primary'])
+        except Exception:
+            pass
+
+        # Update charts data
+        try:
+            temp_f = float(str(self._temp).replace('°C','').strip()) if self._temp not in ('-', '') else None
+            hum_f = float(str(self._hum).replace('%','').strip()) if self._hum not in ('-', '') else None
+        except Exception:
+            temp_f = None
+            hum_f = None
+        
+        self.sample_index += 1
+        self.index_history.append(self.sample_index)
+        self.temp_history.append(temp_f if temp_f is not None else float('nan'))
+        self.hum_history.append(hum_f if hum_f is not None else float('nan'))
+        
+        # Redraw charts
+        try:
+            x = list(self.index_history)
+            self.temp_line.set_data(x, list(self.temp_history))
+            self.hum_line.set_data(x, list(self.hum_history))
+            if x:
+                xmin = max(0, x[-1] - 300)
+                xmax = x[-1] + 1
+                self.ax_temp.set_xlim(xmin, xmax)
+                self.ax_hum.set_xlim(xmin, xmax)
+            # Autoscale y
+            self.ax_temp.relim(); self.ax_temp.autoscale_view(scaley=True)
+            self.ax_hum.relim(); self.ax_hum.autoscale_view(scaley=True)
+            self.canvas.draw_idle()
+        except Exception:
+            pass
+
+        # Create log entry
+        log_entry = f"[{self._time}] {self._status} | GPS: {self._gps} | Temp: {self._temp}°C | Hum: {self._hum}%"
+        self.log_listbox.insert(0, log_entry)
+        
+        # Limit log entries
+        if self.log_listbox.size() > 100:
+            self.log_listbox.delete(100, tk.END)
+        
+        # Write to CSV
+        try:
+            import csv
+            with open("alerts_log.csv", "a", newline="") as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow([self._time, self._status, self._gps, self._temp, self._hum])
+        except Exception as e:
+            print(f"CSV log error: {e}")
+            
         # Check for dangerous conditions and create alerts
-        if danger != "SAFE":
-            self.create_danger_alert(danger, reasons, methane, co, lpg, smoke)
+        if self._danger != "SAFE":
+            self.create_danger_alert(self._danger, self._reasons, self._methane, self._co, self._lpg, self._smoke)
     
     def create_danger_alert(self, danger_level, reasons, methane, co, lpg, smoke):
         """Create and display danger alerts"""
