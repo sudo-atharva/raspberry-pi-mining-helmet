@@ -69,6 +69,7 @@ The system consists of the following modules:
 - **HC-12 Wireless Serial Module**
 - **Power Supply (Battery Pack)**
 - **Helmet (for mounting components)**
+- **Buzzer (for audible alerts)**
 - **Connecting Wires, Breadboard/PCB, Enclosure**
 
 ---
@@ -110,6 +111,12 @@ The system consists of the following modules:
 ---
 
 ...existing code...
+
+### Buzzer
+- **VCC** → 3.3V or 5V (check buzzer spec)
+- **GND** → GND
+- **Signal** → GPIO24 (Pin 18) (or any available GPIO)
+
 
   ```bash
   python main.py
@@ -170,6 +177,7 @@ Below is a summary of typical wiring for the main components. Always refer to ea
 | GPS (NEO-6M)   | 3.3V  | GND   | TX → RXD, RX → TXD   | GPIO15/14   |
 | HC-12          | 3.3V  | GND   | TXD → RXD, RXD → TXD | GPIO15/14   |
 | Camera         | CSI   | CSI   | -                    | CSI Port    |
+| Buzzer         | 3.3V/5V| GND   | Signal               | GPIO24      |
 
 *For a visual diagram, see the datasheets or use Fritzing to create a schematic.*
 

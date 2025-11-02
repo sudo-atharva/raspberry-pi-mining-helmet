@@ -90,7 +90,7 @@ class Config:
     ENABLE_MPU6050 = True
 
     # GPIO Pins
-    BUZZER_PIN = 23
+    BUZZER_PIN = 24  # GPIO24 (Pin 18)
     BUTTON_PIN = 17
     LED_PIN = 27
     MQ_ALERT_PIN = 22
