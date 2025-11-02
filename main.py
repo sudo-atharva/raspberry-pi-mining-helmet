@@ -791,8 +791,10 @@ class DrowsinessDetector:
         self.flag = 0
         self.face_detection_skip = 0
         self.cached_faces = []
-        self.ear_threshold = 0.25  # Eye aspect ratio threshold
-        self.frame_check = 20      # Frames to confirm drowsiness
+        self.ear_threshold = 0.25  # Eye aspect ratio threshold (same as drowsiness_detection.py)
+        self.frame_check = 20      # Frames to confirm drowsiness (same as drowsiness_detection.py)
+        print("Drowsiness detection initialized with thresholds: EAR={}, Frames={}".format(
+            self.ear_threshold, self.frame_check))
         
         # Eye landmarks indices
         self.left_eye_start, self.left_eye_end = face_utils.FACIAL_LANDMARKS_68_IDXS["left_eye"]
@@ -826,9 +828,9 @@ class DrowsinessDetector:
         if not self.detector or not self.predictor:
             return False, False, frame
         
-        # Resize for faster processing
-        small_frame = imutils.resize(frame, width=160)
-        gray = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
+        # Resize for faster processing but keep enough resolution for detection
+        frame = imutils.resize(frame, width=450)  # Same as drowsiness_detection.py
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
         # Face detection with caching
         faces = []
@@ -845,21 +847,13 @@ class DrowsinessDetector:
         drowsy = False
         
         if face_detected:
-            gray_full = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            
             for face in faces:
-                # Scale face coordinates back to full frame
-                scale_factor = frame.shape[1] / small_frame.shape[1]
-                scaled_face = dlib.rectangle(
-                    int(face.left() * scale_factor),
-                    int(face.top() * scale_factor),
-                    int(face.right() * scale_factor),
-                    int(face.bottom() * scale_factor)
-                )
-                
-                # Get facial landmarks
-                shape = self.predictor(gray_full, scaled_face)
+                # Process face directly since we're using full resolution
+                shape = self.predictor(gray, face)
                 shape = face_utils.shape_to_np(shape)
+                
+                # Get facial landmarks (already handled above)
+                # shape conversion already done above
                 
                 # Extract eye regions
                 left_eye = shape[self.left_eye_start:self.left_eye_end]
@@ -952,6 +946,20 @@ class HC12Communication:
         return False
     
     def send_data(self, data):
+        """Send data through HC-12 module with proper formatting"""
+        if not self.serial_port or not self.connected:
+            return False
+            
+        try:
+            # Format data as a properly structured message
+            message = f"DATA:{data}\n"  # Add proper prefix and terminator
+            self.serial_port.write(message.encode('utf-8'))
+            self.serial_port.flush()  # Ensure data is sent
+            return True
+        except Exception as e:
+            print(f"HC-12 send error: {e}")
+            self.connected = False
+            return False
         """Send data via HC-12"""
         if self.connected and self.serial_port:
             try:
