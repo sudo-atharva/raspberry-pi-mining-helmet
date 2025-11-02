@@ -798,7 +798,7 @@ class DrowsinessDetector:
         self.cached_faces = []
         
         # Adjusted thresholds for better performance on Raspberry Pi
-        self.ear_threshold = 0.23  # Slightly lower threshold for more sensitivity
+        self.ear_threshold = 0.15  # Slightly lower threshold for more sensitivity
         self.frame_check = 15      # Fewer frames to confirm drowsiness for faster response
         
         # Eye landmarks indices
