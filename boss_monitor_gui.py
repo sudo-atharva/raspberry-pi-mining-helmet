@@ -1,8 +1,9 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
+from serial.serialutil import SerialException
 import serial
 import serial.tools.list_ports
-from serial.serialutil import SerialException
+import re
 import threading
 import time
 from datetime import datetime
@@ -15,6 +16,69 @@ try:
     MATPLOTLIB_AVAILABLE = True
 except Exception:
     MATPLOTLIB_AVAILABLE = False
+
+
+def parse_hc12_message(msg: str) -> dict:
+    """Parse a single HC-12 message line into a dict. This mirrors the sender format in main.py.
+
+    Returns dict with keys: status,gps,temp,hum,methane,co,lpg,smoke,air_quality,danger,reasons,time
+    """
+    try:
+        raw = msg.strip()
+        if not raw:
+            return {}
+
+        # Extract leading status (before the first comma)
+        m = re.match(r"\s*([^,]+)\s*,?\s*(.*)$", raw)
+        if m:
+            status = m.group(1).strip()
+            rest = m.group(2) or ""
+        else:
+            status = raw
+            rest = ""
+
+        # Extract REASONS (may contain commas) and TIME if present
+        reasons = None
+        time_val = None
+        reasons_match = re.search(r'REASONS:(.*),TIME:([0-9:]{5,8})', rest)
+        if reasons_match:
+            reasons = reasons_match.group(1).strip()
+            time_val = reasons_match.group(2).strip()
+            rest = rest[:reasons_match.start()] + rest[reasons_match.end():]
+        else:
+            time_match = re.search(r'TIME:([0-9:]{5,8})', rest)
+            if time_match:
+                time_val = time_match.group(1).strip()
+                rest = rest.replace(time_match.group(0), '')
+
+        # Extract simple KEY:VALUE pairs (values can be parentheses containing commas such as GPS)
+        pairs = {}
+        for pm in re.finditer(r"([A-Z_]+):(\([^\)]*\)|[^,]+)", rest):
+            key = pm.group(1).strip()
+            val = pm.group(2).strip()
+            pairs[key] = val
+
+        gps = pairs.get('GPS', '-')
+        if gps.startswith('(') and gps.endswith(')'):
+            gps = gps[1:-1]
+
+        parsed = {
+            'status': status,
+            'gps': gps,
+            'temp': pairs.get('TEMP', '-'),
+            'hum': pairs.get('HUM', '-'),
+            'methane': pairs.get('METHANE', '-'),
+            'co': pairs.get('CO', '-'),
+            'lpg': pairs.get('LPG', '-'),
+            'smoke': pairs.get('SMOKE', '-'),
+            'air_quality': pairs.get('AIR_QUALITY', '-'),
+            'danger': pairs.get('DANGER', 'SAFE'),
+            'reasons': reasons if reasons is not None else pairs.get('REASONS', '-'),
+            'time': time_val if time_val is not None else pairs.get('TIME', datetime.now().strftime('%H:%M:%S'))
+        }
+        return parsed
+    except Exception:
+        return {}
 
 # =============================
 # CONFIGURATION
@@ -836,47 +900,96 @@ class ModernBossMonitorGUI:
                 pass
 
     def process_message(self, msg):
-        """Process incoming messages and update GUI"""
-        # Enhanced message format: STATUS,GPS:(lat,lon),TEMP:xx.x,HUM:xx.x,METHANE:xx.x,CO:xx.x,LPG:xx.x,SMOKE:xx.x,AIR_QUALITY:xx.x,DANGER:LEVEL,REASONS:xxx,TIME:HH:MM:SS
-        import csv
-        parts = msg.split(',')
-        self._status = parts[0] if parts else "Unknown"
-        self._gps = "-"
-        self._temp = "-"
-        self._hum = "-"
-        self._methane = "-"
-        self._co = "-"
-        self._lpg = "-"
-        self._smoke = "-"
-        self._air_quality = "-"
-        self._danger = "SAFE"
-        self._reasons = "-"
-        self._time = datetime.now().strftime('%H:%M:%S')
-        
-        for p in parts:
-            if p.startswith("GPS:"):
-                self._gps = p[4:]
-            elif p.startswith("TEMP:"):
-                self._temp = p[5:]
-            elif p.startswith("HUM:"):
-                self._hum = p[4:]
-            elif p.startswith("METHANE:"):
-                self._methane = p[8:]
-            elif p.startswith("CO:"):
-                self._co = p[3:]
-            elif p.startswith("LPG:"):
-                self._lpg = p[4:]
-            elif p.startswith("SMOKE:"):
-                self._smoke = p[6:]
-            elif p.startswith("AIR_QUALITY:"):
-                self._air_quality = p[12:]
-            elif p.startswith("DANGER:"):
-                self._danger = p[7:]
-            elif p.startswith("REASONS:"):
-                self._reasons = p[8:]
-            elif p.startswith("TIME:"):
-                self._time = p[5:]
-        
+        """Parse incoming message (from main.py) and schedule UI update on the Tk thread.
+
+        Expected message format (one line):
+        STATUS,GPS:(lat,lon),TEMP:xx.x,HUM:xx.x,METHANE:xx.x,CO:xx.x,LPG:xx.x,SMOKE:xx.x,AIR_QUALITY:xx.x,DANGER:LEVEL,REASONS:xxx,TIME:HH:MM:SS
+        """
+        try:
+            raw = msg.strip()
+            if not raw:
+                return
+
+            # Extract leading status (before the first comma)
+            m = re.match(r"\s*([^,]+)\s*,?\s*(.*)$", raw)
+            if m:
+                status = m.group(1).strip()
+                rest = m.group(2) or ""
+            else:
+                status = raw
+                rest = ""
+
+            # First, extract REASONS (may contain commas) and TIME if present, so REASONS doesn't get split by commas
+            reasons = None
+            time_val = None
+            reasons_match = re.search(r'REASONS:(.*),TIME:([0-9:]{5,8})', rest)
+            if reasons_match:
+                reasons = reasons_match.group(1).strip()
+                time_val = reasons_match.group(2).strip()
+                # remove the matched REASONS...,TIME:... from rest so subsequent parsing isn't confused by commas
+                rest = rest[:reasons_match.start()] + rest[reasons_match.end():]
+            else:
+                # fallback: look for TIME alone
+                time_match = re.search(r'TIME:([0-9:]{5,8})', rest)
+                if time_match:
+                    time_val = time_match.group(1).strip()
+                    rest = rest.replace(time_match.group(0), '')
+
+            # Find KEY:VALUE pairs. Value may be in parentheses (e.g. GPS:(lat,lon)) which can contain commas.
+            pairs = dict()
+            for pm in re.finditer(r"([A-Z_]+):(\([^\)]*\)|[^,]+)", rest):
+                key = pm.group(1).strip()
+                val = pm.group(2).strip()
+                pairs[key] = val
+
+            # Normalize and strip parentheses for GPS
+            gps = pairs.get('GPS', '-')
+            if gps.startswith('(') and gps.endswith(')'):
+                gps = gps[1:-1]
+
+            parsed = {
+                'status': status,
+                'gps': gps,
+                'temp': pairs.get('TEMP', '-'),
+                'hum': pairs.get('HUM', '-'),
+                'methane': pairs.get('METHANE', '-'),
+                'co': pairs.get('CO', '-'),
+                'lpg': pairs.get('LPG', '-'),
+                'smoke': pairs.get('SMOKE', '-'),
+                'air_quality': pairs.get('AIR_QUALITY', '-'),
+                'danger': pairs.get('DANGER', 'SAFE'),
+                'reasons': reasons if reasons is not None else pairs.get('REASONS', '-'),
+                'time': time_val if time_val is not None else pairs.get('TIME', datetime.now().strftime('%H:%M:%S'))
+            }
+            # Debug: print parsed message (helpful when data not showing correctly)
+            print(f"Parsed HC-12 message: {parsed}")
+
+            # Schedule UI update on main thread
+            try:
+                self.master.after(0, lambda p=parsed: self._update_ui_with_parsed(p))
+            except Exception:
+                # Fallback: if master not available, update inline
+                self._update_ui_with_parsed(parsed)
+
+        except Exception as e:
+            print(f"process_message parse error: {e} -- raw: {repr(msg)}")
+
+    def _update_ui_with_parsed(self, parsed):
+        """Apply parsed data to GUI and internal state. Runs on Tk main thread."""
+        # Update internal state
+        self._status = parsed.get('status', self._status)
+        self._gps = parsed.get('gps', self._gps)
+        self._temp = parsed.get('temp', self._temp)
+        self._hum = parsed.get('hum', self._hum)
+        self._methane = parsed.get('methane', self._methane)
+        self._co = parsed.get('co', self._co)
+        self._lpg = parsed.get('lpg', self._lpg)
+        self._smoke = parsed.get('smoke', self._smoke)
+        self._air_quality = parsed.get('air_quality', self._air_quality)
+        self._danger = parsed.get('danger', self._danger)
+        self._reasons = parsed.get('reasons', self._reasons)
+        self._time = parsed.get('time', self._time)
+
         # Update GUI variables
         self.status_var.set(self._status)
         self.gps_var.set(self._gps)
@@ -889,37 +1002,34 @@ class ModernBossMonitorGUI:
         self.air_quality_var.set(self._air_quality)
         self.danger_var.set(self._danger)
         self.time_var.set(self._time)
-        
-        # Update danger color
-        self.update_danger_color()
-        
-        # Update status color based on worker status
-        try:
-            if hasattr(self, 'status_value_label'):
-                if 'DROWSY' in self._status or 'NO_FACE' in self._status or 'ALERT' in self._status:
-                    self.status_value_label.configure(fg=self.colors['danger'])
-                elif 'AWAKE' in self._status or 'FACE' in self._status:
-                    self.status_value_label.configure(fg=self.colors['success'])
-                else:
-                    self.status_value_label.configure(fg=self.colors['primary'])
-        except Exception:
-            pass
 
-        # Update charts data
-        try:
-            temp_f = float(str(self._temp).replace('°C','').strip()) if self._temp not in ('-', '') else None
-            hum_f = float(str(self._hum).replace('%','').strip()) if self._hum not in ('-', '') else None
-        except Exception:
-            temp_f = None
-            hum_f = None
-        
-        self.sample_index += 1
-        self.index_history.append(self.sample_index)
-        self.temp_history.append(temp_f if temp_f is not None else float('nan'))
-        self.hum_history.append(hum_f if hum_f is not None else float('nan'))
-        
-        # Redraw charts
-        try:
+        # Update danger/status colors
+        self.update_danger_color()
+        if hasattr(self, 'status_value_label'):
+            s = (self._status or "").upper()
+            if 'DROWSY' in s or 'NO_FACE' in s or 'ALERT' in s:
+                self.status_value_label.configure(fg=self.colors['danger'])
+            elif 'AWAKE' in s or 'FACE' in s:
+                self.status_value_label.configure(fg=self.colors['success'])
+            else:
+                self.status_value_label.configure(fg=self.colors['primary'])
+
+        # Update charts data (if matplotlib available and initialized)
+        if MATPLOTLIB_AVAILABLE and self.temp_line is not None and self.hum_line is not None:
+            try:
+                temp_f = float(str(self._temp).replace('°C','').strip()) if self._temp not in ('-', '') else None
+            except Exception:
+                temp_f = None
+            try:
+                hum_f = float(str(self._hum).replace('%','').strip()) if self._hum not in ('-', '') else None
+            except Exception:
+                hum_f = None
+
+            self.sample_index += 1
+            self.index_history.append(self.sample_index)
+            self.temp_history.append(temp_f if temp_f is not None else float('nan'))
+            self.hum_history.append(hum_f if hum_f is not None else float('nan'))
+
             x = list(self.index_history)
             self.temp_line.set_data(x, list(self.temp_history))
             self.hum_line.set_data(x, list(self.hum_history))
@@ -928,33 +1038,12 @@ class ModernBossMonitorGUI:
                 xmax = x[-1] + 1
                 self.ax_temp.set_xlim(xmin, xmax)
                 self.ax_hum.set_xlim(xmin, xmax)
-            # Autoscale y
             self.ax_temp.relim(); self.ax_temp.autoscale_view(scaley=True)
             self.ax_hum.relim(); self.ax_hum.autoscale_view(scaley=True)
-            self.canvas.draw_idle()
-        except Exception:
-            pass
-
-        # Create log entry
-        log_entry = f"[{self._time}] {self._status} | GPS: {self._gps} | Temp: {self._temp}°C | Hum: {self._hum}%"
-        self.log_listbox.insert(0, log_entry)
-        
-        # Limit log entries
-        if self.log_listbox.size() > 100:
-            self.log_listbox.delete(100, tk.END)
-        
-        # Write to CSV
-        try:
-            import csv
-            with open("alerts_log.csv", "a", newline="") as csvfile:
-                writer = csv.writer(csvfile)
-                writer.writerow([self._time, self._status, self._gps, self._temp, self._hum])
-        except Exception as e:
-            print(f"CSV log error: {e}")
-            
-        # Check for dangerous conditions and create alerts
-        if self._danger != "SAFE":
-            self.create_danger_alert(self._danger, self._reasons, self._methane, self._co, self._lpg, self._smoke)
+            try:
+                self.canvas.draw_idle()
+            except Exception:
+                pass
     
     def create_danger_alert(self, danger_level, reasons, methane, co, lpg, smoke):
         """Create and display danger alerts"""
@@ -1035,77 +1124,108 @@ class ModernBossMonitorGUI:
             # Auto-close after 30 seconds
             popup.after(30000, popup.destroy)
             
+            # Update alert counter
+            self.alert_count += 1
+            self.alert_counter_var.set(str(self.alert_count))
+            
         except Exception as e:
             print(f"Error showing critical alert popup: {e}")
-        
-        # Update alert counter
-        self.alert_count += 1
-        self.alert_counter_var.set(str(self.alert_count))
-        
-        # Alert color for status
+        finally:
+            self.update_status_and_charts()
+
+    def update_status_and_charts(self):
+        """Update status colors and chart data"""
+        # Update status color using current internal state
         try:
             if hasattr(self, 'status_value_label'):
-                if 'DROWSY' in status or 'NO_FACE' in status or 'ALERT' in status:
+                s = (self._status or "").upper()
+                if 'DROWSY' in s or 'NO_FACE' in s or 'ALERT' in s:
                     self.status_value_label.configure(fg=self.colors['danger'])
-                elif 'AWAKE' in status or 'FACE' in status:
+                elif 'AWAKE' in s or 'FACE' in s:
                     self.status_value_label.configure(fg=self.colors['success'])
                 else:
                     self.status_value_label.configure(fg=self.colors['primary'])
         except Exception:
             pass
 
-        # Update charts data
-        try:
-            temp_f = float(str(temp).replace('°C','').strip()) if temp not in ('-', '') else None
-            hum_f = float(str(hum).replace('%','').strip()) if hum not in ('-', '') else None
-        except Exception:
-            temp_f = None
-            hum_f = None
-        self.sample_index += 1
-        self.index_history.append(self.sample_index)
-        self.temp_history.append(temp_f if temp_f is not None else float('nan'))
-        self.hum_history.append(hum_f if hum_f is not None else float('nan'))
-        
-        # Redraw charts
-        try:
-            x = list(self.index_history)
-            self.temp_line.set_data(x, list(self.temp_history))
-            self.hum_line.set_data(x, list(self.hum_history))
-            if x:
-                xmin = max(0, x[-1] - 300)
-                xmax = x[-1] + 1
-                self.ax_temp.set_xlim(xmin, xmax)
-                self.ax_hum.set_xlim(xmin, xmax)
-            # Autoscale y
-            self.ax_temp.relim(); self.ax_temp.autoscale_view(scaley=True)
-            self.ax_hum.relim(); self.ax_hum.autoscale_view(scaley=True)
-            self.canvas.draw_idle()
-        except Exception:
-            pass
+        # Update charts data using current temp/hum
+        if MATPLOTLIB_AVAILABLE and self.temp_line is not None and self.hum_line is not None:
+            try:
+                temp_f = float(str(self._temp).replace('°C','').strip()) if self._temp not in ('-', '') else None
+            except Exception:
+                temp_f = None
+            try:
+                hum_f = float(str(self._hum).replace('%','').strip()) if self._hum not in ('-', '') else None
+            except Exception:
+                hum_f = None
 
-        # Create log entry with timestamp and formatting
-        log_entry = f"[{t}] {status} | GPS: {gps} | Temp: {temp}°C | Hum: {hum}%"
-        self.log_listbox.insert(0, log_entry)
-        
-        # Limit log entries
-        if self.log_listbox.size() > 100:
-            self.log_listbox.delete(100, tk.END)
-        
-        # Write to CSV
-        try:
-            with open("alerts_log.csv", "a", newline="") as csvfile:
-                writer = csv.writer(csvfile)
-                writer.writerow([t, status, gps, temp, hum])
-        except Exception as e:
-            print(f"CSV log error: {e}")
+            self.sample_index += 1
+            self.index_history.append(self.sample_index)
+            self.temp_history.append(temp_f if temp_f is not None else float('nan'))
+            self.hum_history.append(hum_f if hum_f is not None else float('nan'))
+
+            try:
+                x = list(self.index_history)
+                self.temp_line.set_data(x, list(self.temp_history))
+                self.hum_line.set_data(x, list(self.hum_history))
+                if x:
+                    xmin = max(0, x[-1] - 300)
+                    xmax = x[-1] + 1
+                    self.ax_temp.set_xlim(xmin, xmax)
+                    self.ax_hum.set_xlim(xmin, xmax)
+                self.ax_temp.relim()
+                self.ax_temp.autoscale_view(scaley=True)
+                self.ax_hum.relim()
+                self.ax_hum.autoscale_view(scaley=True)
+                try:
+                    self.canvas.draw_idle()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+            # Create log entry with current internal state and write to GUI and CSV
+            try:
+                log_entry = f"[{self._time}] {self._status} | GPS: {self._gps} | Temp: {self._temp} | Hum: {self._hum}"
+                self.log_listbox.insert(0, log_entry)
+                if self.log_listbox.size() > 100:
+                    self.log_listbox.delete(100, tk.END)
+                    
+                try:
+                    with open("alerts_log.csv", "a", newline="") as csvfile:
+                        writer = csv.writer(csvfile)
+                        writer.writerow([self._time, self._status, self._gps, self._temp, self._hum])
+                except Exception as e:
+                    print(f"CSV log error: {e}")
+            except Exception:
+                pass
 
 # =============================
 # MAIN
 # =============================
 
 def main():
+    import sys
     root = tk.Tk()
     app = ModernBossMonitorGUI(root)
+
+    # If user passed --simulate, feed sample messages to GUI for testing
+    if '--simulate' in sys.argv:
+        def simulate_messages():
+            samples = [
+                "AWAKE,GPS:(12.345678,98.765432),TEMP:25.3,HUM:45.2,METHANE:10.0,CO:0.1,LPG:5.0,SMOKE:0.0,AIR_QUALITY:98.5,DANGER:SAFE,REASONS:NONE,TIME:12:34:56",
+                "DROWSY,GPS:(12.345900,98.765600),TEMP:30.2,HUM:70.1,METHANE:1200.0,CO:60.2,LPG:1500.0,SMOKE:10.0,AIR_QUALITY:20.0,DANGER:CRITICAL,REASONS:HIGH_METHANE,HIGH_CO,TIME:12:35:10",
+                "ALERT,GPS:(-33.865143,151.209900),TEMP:22.1,HUM:40.0,METHANE:5.0,CO:0.0,LPG:2.0,SMOKE:0.0,AIR_QUALITY:99.0,DANGER:WARNING,REASONS:SMOKE_DETECTED,TIME:12:35:30"
+            ]
+            i = 0
+            def send_next():
+                nonlocal i
+                app.process_message(samples[i % len(samples)])
+                i += 1
+                root.after(1500, send_next)
+            root.after(1000, send_next)
+        simulate_messages()
+
     root.mainloop()
 
 if __name__ == "__main__":
