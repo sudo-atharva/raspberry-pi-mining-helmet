@@ -789,54 +789,32 @@ class DrowsinessDetector:
     """Enhanced drowsiness detection with improved algorithms"""
     
     def __init__(self):
-        self.detector = None
-        self.predictor = None
-        
-        # Initialize with more permissive defaults for Raspberry Pi
+        # Use the same thresholds as the working reference
+        self.ear_threshold = 0.25  # Same as reference
+        self.frame_check = 20      # Same as reference
         self.flag = 0
-        self.face_detection_skip = 0
-        self.cached_faces = []
-        
-        # Adjusted thresholds for better performance on Raspberry Pi
-        self.ear_threshold = 0.15  # Slightly lower threshold for more sensitivity
-        self.frame_check = 15      # Fewer frames to confirm drowsiness for faster response
-        
-        # Eye landmarks indices
-        try:
-            self.left_eye_start, self.left_eye_end = face_utils.FACIAL_LANDMARKS_68_IDXS["left_eye"]
-            self.right_eye_start, self.right_eye_end = face_utils.FACIAL_LANDMARKS_68_IDXS["right_eye"]
-        except (AttributeError, KeyError):
-            # Fallback values in case face_utils doesn't have the expected attributes
-            self.left_eye_start, self.left_eye_end = 36, 42
-            self.right_eye_start, self.right_eye_end = 42, 48
         
         # Initialize face detection models
-        if not self.initialize():
-            print("WARNING: Face detection initialization failed. Drowsiness detection will not work.")
+        self.detector = dlib.get_frontal_face_detector()
+        self.predictor = None
         
-        print("Drowsiness detection initialized with thresholds: EAR={}, Frames={}".format(
-            self.ear_threshold, self.frame_check))
-    
-    def initialize(self):
-        """Initialize face detection models"""
+        # Eye landmarks indices - using direct indices from reference
+        (self.left_eye_start, self.left_eye_end) = face_utils.FACIAL_LANDMARKS_68_IDXS["left_eye"]
+        (self.right_eye_start, self.right_eye_end) = face_utils.FACIAL_LANDMARKS_68_IDXS["right_eye"]
+        
+        # Initialize the predictor
         model_path = Config.FACE_LANDMARKS_PATH
-        if not os.path.exists(model_path):
+        if os.path.exists(model_path):
+            self.predictor = dlib.shape_predictor(model_path)
+            print(f"✓ Face detection model loaded from {model_path}")
+        else:
             print(f"ERROR: Face landmarks file not found at {model_path}")
             print("Please download from: http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2")
             print("Extract and place it in the models/ directory")
-            return False
-        
-        try:
-            self.detector = dlib.get_frontal_face_detector()
-            self.predictor = dlib.shape_predictor(model_path)
-            print(f"✓ Face detection models loaded successfully from {model_path}")
-            print(f"  EAR threshold: {self.ear_threshold}, Frame check: {self.frame_check}")
-            return True
-        except Exception as e:
-            print(f"ERROR: Face detection initialization failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
+    
+    def reset_detection(self):
+        """Reset drowsiness detection state"""
+        self.flag = 0
     
     def eye_aspect_ratio(self, eye):
         """Calculate eye aspect ratio"""
@@ -846,83 +824,65 @@ class DrowsinessDetector:
         return (A + B) / (2.0 * C)
     
     def detect_drowsiness(self, frame):
-        """Detect drowsiness in frame with optimizations for Raspberry Pi"""
-        if not self.detector or not self.predictor:
-            # Draw warning on frame if models not loaded
+        """Detect drowsiness in frame - matching reference implementation"""
+        if not self.predictor:
+            # Draw warning on frame if model not loaded
             cv2.putText(frame, "Face detection not initialized", (10, 30),
                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
             return False, False, frame
         
-        # Optimize for Raspberry Pi by reducing frame size
-        frame = imutils.resize(frame, width=320)  # Reduced from 450 for better performance
+        # Match the reference implementation's frame processing
+        frame = imutils.resize(frame, width=450)  # Same as reference
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
-        # Only process every other frame to reduce CPU load
-        self.face_detection_skip = (self.face_detection_skip + 1) % 2
-        if self.face_detection_skip != 0 and self.cached_faces:
-            faces = self.cached_faces
-        else:
-            # Use a smaller scale factor for faster detection (1.1 is more aggressive than default 1.3)
-            faces = self.detector(gray, 0)
-            self.cached_faces = faces
-        
+        # Detect faces in the grayscale frame
+        faces = self.detector(gray, 0)  # Same as reference
         face_detected = len(faces) > 0
         drowsy = False
         
         if face_detected:
             for face in faces:
                 try:
-                    # Get facial landmarks
+                    # Get facial landmarks - same as reference
                     shape = self.predictor(gray, face)
                     shape = face_utils.shape_to_np(shape)
                     
-                    # Extract eye regions
+                    # Extract eye regions - same as reference
                     leftEye = shape[self.left_eye_start:self.left_eye_end]
                     rightEye = shape[self.right_eye_start:self.right_eye_end]
                     
-                    # Draw eye regions for visualization (only if debugging)
-                    if __debug__:
-                        leftEyeHull = cv2.convexHull(leftEye)
-                        rightEyeHull = cv2.convexHull(rightEye)
-                        cv2.drawContours(frame, [leftEyeHull], -1, (0, 255, 0), 1)
-                        cv2.drawContours(frame, [rightEyeHull], -1, (0, 255, 0), 1)
-                    
-                    # Calculate EAR (Eye Aspect Ratio)
+                    # Calculate EAR - same as reference
                     leftEAR = self.eye_aspect_ratio(leftEye)
                     rightEAR = self.eye_aspect_ratio(rightEye)
                     ear = (leftEAR + rightEAR) / 2.0
                     
-                    # Drowsiness detection with hysteresis
-                    if ear < self.ear_threshold * 0.9:  # Slightly lower threshold for more confidence
+                    # Draw eye contours - same as reference
+                    leftEyeHull = cv2.convexHull(leftEye)
+                    rightEyeHull = cv2.convexHull(rightEye)
+                    cv2.drawContours(frame, [leftEyeHull], -1, (0, 255, 0), 1)
+                    cv2.drawContours(frame, [rightEyeHull], -1, (0, 255, 0), 1)
+                    
+                    # Drowsiness detection - same as reference
+                    if ear < self.ear_threshold:
                         self.flag += 1
-                    elif ear > self.ear_threshold * 1.1:  # Only reset if well above threshold
-                        self.flag = max(0, self.flag - 2)  # Faster recovery from false positives
+                        if self.flag >= self.frame_check:
+                            drowsy = True
+                            cv2.putText(frame, "****************ALERT!****************", (10, 30),
+                                      cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                            cv2.putText(frame, "****************ALERT!****************", (10, 325),
+                                      cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    else:
+                        self.flag = 0
                     
-                    # Check if drowsiness is detected
-                    if self.flag >= self.frame_check:
-                        drowsy = True
-                        cv2.putText(frame, "****************ALERT!****************", (10, 30),
-                                  cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-                        cv2.putText(frame, "****************ALERT!****************", (10, frame.shape[0]-20),
-                                  cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-                    
-                    # Debug information (only show in debug mode)
-                    if __debug__:
-                        cv2.putText(frame, f"EAR: {ear:.2f}", (10, 60),
-                                  cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
-                        cv2.putText(frame, f"Frames: {self.flag}/{self.frame_check}", (10, 80),
-                                  cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
-                    
-                    break  # Only process the first face found
+                    # Display EAR for debugging
+                    cv2.putText(frame, f"EAR: {ear:.2f}", (10, 60),
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                     
                 except Exception as e:
-                    if __debug__:
-                        print(f"Error processing face: {e}")
-                    continue
+                    print(f"Error processing face: {e}")
         else:
-            # Gradually decrease flag when no face is detected
-            if self.flag > 0:
-                self.flag = max(0, self.flag - 1)
+            # Reset flag when no face is detected - same as reference
+            self.flag = 0
         
         return face_detected, drowsy, frame
 
