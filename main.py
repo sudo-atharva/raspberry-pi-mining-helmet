@@ -802,15 +802,17 @@ class DrowsinessDetector:
     
     def initialize(self):
         """Initialize face detection models"""
-        if not os.path.exists(Config.FACE_LANDMARKS_PATH):
-            print(f"Error: Face landmarks file not found at {Config.FACE_LANDMARKS_PATH}")
+        model_path = "models/shape_predictor_68_face_landmarks.dat"  # Use the same path as drowsiness_detection.py
+        if not os.path.exists(model_path):
+            print(f"Error: Face landmarks file not found at {model_path}")
             print("Please download from: http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2")
+            print("and place it in the models/ directory")
             return False
         
         try:
             self.detector = dlib.get_frontal_face_detector()
-            self.predictor = dlib.shape_predictor(Config.FACE_LANDMARKS_PATH)
-            print("Face detection models loaded successfully")
+            self.predictor = dlib.shape_predictor(model_path)
+            print("Face detection models loaded successfully from", model_path)
             return True
         except Exception as e:
             print(f"Face detection initialization failed: {e}")
@@ -832,52 +834,41 @@ class DrowsinessDetector:
         frame = imutils.resize(frame, width=450)  # Same as drowsiness_detection.py
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
-        # Face detection with caching
-        faces = []
-        if self.face_detection_skip <= 0:
-            faces = self.detector(gray, 0)
-            if faces:
-                self.cached_faces = faces
-            self.face_detection_skip = Config.FACE_DETECT_INTERVAL
-        else:
-            faces = self.cached_faces
-            self.face_detection_skip -= 1
+        # Direct face detection like in drowsiness_detection.py
+        faces = self.detector(gray, 0)  # Remove caching to ensure fresh detection every frame
         
         face_detected = len(faces) > 0
         drowsy = False
         
         if face_detected:
             for face in faces:
-                # Process face directly since we're using full resolution
+                # Get facial landmarks
                 shape = self.predictor(gray, face)
                 shape = face_utils.shape_to_np(shape)
                 
-                # Get facial landmarks (already handled above)
-                # shape conversion already done above
-                
                 # Extract eye regions
-                left_eye = shape[self.left_eye_start:self.left_eye_end]
-                right_eye = shape[self.right_eye_start:self.right_eye_end]
+                leftEye = shape[self.left_eye_start:self.left_eye_end]
+                rightEye = shape[self.right_eye_start:self.right_eye_end]
+                
+                # Draw eye regions for visualization
+                leftEyeHull = cv2.convexHull(leftEye)
+                rightEyeHull = cv2.convexHull(rightEye)
+                cv2.drawContours(frame, [leftEyeHull], -1, (0, 255, 0), 1)
+                cv2.drawContours(frame, [rightEyeHull], -1, (0, 255, 0), 1)
                 
                 # Calculate EAR
-                left_ear = self.eye_aspect_ratio(left_eye)
-                right_ear = self.eye_aspect_ratio(right_eye)
-                ear = (left_ear + right_ear) / 2.0
+                leftEAR = self.eye_aspect_ratio(leftEye)
+                rightEAR = self.eye_aspect_ratio(rightEye)
+                ear = (leftEAR + rightEAR) / 2.0
                 
-                # Draw eye contours
-                left_eye_hull = cv2.convexHull(left_eye)
-                right_eye_hull = cv2.convexHull(right_eye)
-                cv2.drawContours(frame, [left_eye_hull], -1, (0, 255, 0), 1)
-                cv2.drawContours(frame, [right_eye_hull], -1, (0, 255, 0), 1)
-                
-                # Drowsiness detection
+                # Drowsiness detection - exactly like drowsiness_detection.py
                 if ear < self.ear_threshold:
                     self.flag += 1
+                    print(self.flag)  # Debug print like in original
                     if self.flag >= self.frame_check:
                         drowsy = True
-                        cv2.putText(frame, "DROWSY ALERT!", (10, 30),
+                        cv2.putText(frame, "****************ALERT!****************", (10, 30),
                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                        # Additional alert text for better visibility
                         cv2.putText(frame, "****************ALERT!****************", (10, 325),
                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                 else:
