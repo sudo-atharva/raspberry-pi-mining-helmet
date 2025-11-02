@@ -740,20 +740,27 @@ class CameraManager:
         
         return False
     
-    def read_frame(self):
-        """Read frame from camera"""
+    def read_frame(self, apply_orientation=False):
+        """Read frame from camera
+        
+        Args:
+            apply_orientation: If True, apply camera orientation transformation.
+                              False by default to allow raw frames for processing.
+        """
         with self.lock:
             try:
                 if self.cap:
                     ret, frame = self.cap.read()
                     if not ret or frame is None:
                         return None
-                    frame = self._apply_orientation(frame)
+                    if apply_orientation:
+                        frame = self._apply_orientation(frame)
                     return frame
                 elif self.picam2:
                     frame = self.picam2.capture_array()
                     if frame.shape[-1] == 4:
                         frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+                    if apply_orientation:
                         frame = self._apply_orientation(frame)
                     return frame
             except Exception as e:
@@ -761,9 +768,6 @@ class CameraManager:
                 return None
     def _apply_orientation(self, frame):
         """Apply orientation to frame based on config"""
-        # Debug print to confirm orientation is being used
-        if self.orientation != 'normal':
-            print(f"Applying camera orientation: {self.orientation}")
         if self.orientation == 'flip':
             return cv2.flip(frame, -1)  # Flip both axes
         elif self.orientation == 'rotate_90':
@@ -803,20 +807,23 @@ class DrowsinessDetector:
     
     def initialize(self):
         """Initialize face detection models"""
-        model_path = "models/shape_predictor_68_face_landmarks.dat"  # Use the same path as drowsiness_detection.py
+        model_path = Config.FACE_LANDMARKS_PATH
         if not os.path.exists(model_path):
-            print(f"Error: Face landmarks file not found at {model_path}")
+            print(f"ERROR: Face landmarks file not found at {model_path}")
             print("Please download from: http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2")
-            print("and place it in the models/ directory")
+            print("Extract and place it in the models/ directory")
             return False
         
         try:
             self.detector = dlib.get_frontal_face_detector()
             self.predictor = dlib.shape_predictor(model_path)
-            print("Face detection models loaded successfully from", model_path)
+            print(f"✓ Face detection models loaded successfully from {model_path}")
+            print(f"  EAR threshold: {self.ear_threshold}, Frame check: {self.frame_check}")
             return True
         except Exception as e:
-            print(f"Face detection initialization failed: {e}")
+            print(f"ERROR: Face detection initialization failed: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def eye_aspect_ratio(self, eye):
@@ -829,6 +836,9 @@ class DrowsinessDetector:
     def detect_drowsiness(self, frame):
         """Detect drowsiness in frame"""
         if not self.detector or not self.predictor:
+            # Draw warning on frame if models not loaded
+            cv2.putText(frame, "Face detection not initialized", (10, 30),
+                      cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
             return False, False, frame
         
         # Resize for faster processing but keep enough resolution for detection
@@ -843,45 +853,52 @@ class DrowsinessDetector:
         
         if face_detected:
             for face in faces:
-                # Get facial landmarks
-                shape = self.predictor(gray, face)
-                shape = face_utils.shape_to_np(shape)
-                
-                # Extract eye regions
-                leftEye = shape[self.left_eye_start:self.left_eye_end]
-                rightEye = shape[self.right_eye_start:self.right_eye_end]
-                
-                # Draw eye regions for visualization
-                leftEyeHull = cv2.convexHull(leftEye)
-                rightEyeHull = cv2.convexHull(rightEye)
-                cv2.drawContours(frame, [leftEyeHull], -1, (0, 255, 0), 1)
-                cv2.drawContours(frame, [rightEyeHull], -1, (0, 255, 0), 1)
-                
-                # Calculate EAR
-                leftEAR = self.eye_aspect_ratio(leftEye)
-                rightEAR = self.eye_aspect_ratio(rightEye)
-                ear = (leftEAR + rightEAR) / 2.0
-                
-                # Drowsiness detection - exactly like drowsiness_detection.py
-                if ear < self.ear_threshold:
-                    self.flag += 1
-                    print(self.flag)  # Debug print like in original
-                    if self.flag >= self.frame_check:
-                        drowsy = True
-                        cv2.putText(frame, "****************ALERT!****************", (10, 30),
-                                  cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                        cv2.putText(frame, "****************ALERT!****************", (10, 325),
-                                  cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                else:
-                    self.flag = 0
-                
-                # Display EAR
-                cv2.putText(frame, f"EAR: {ear:.2f}", (10, 60),
-                          cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-                # Display frame count for debugging
-                cv2.putText(frame, f"Frame Count: {self.flag}", (10, 90),
-                          cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
-                break
+                try:
+                    # Get facial landmarks
+                    shape = self.predictor(gray, face)
+                    shape = face_utils.shape_to_np(shape)
+                    
+                    # Extract eye regions
+                    leftEye = shape[self.left_eye_start:self.left_eye_end]
+                    rightEye = shape[self.right_eye_start:self.right_eye_end]
+                    
+                    # Draw eye regions for visualization
+                    leftEyeHull = cv2.convexHull(leftEye)
+                    rightEyeHull = cv2.convexHull(rightEye)
+                    cv2.drawContours(frame, [leftEyeHull], -1, (0, 255, 0), 1)
+                    cv2.drawContours(frame, [rightEyeHull], -1, (0, 255, 0), 1)
+                    
+                    # Calculate EAR
+                    leftEAR = self.eye_aspect_ratio(leftEye)
+                    rightEAR = self.eye_aspect_ratio(rightEye)
+                    ear = (leftEAR + rightEAR) / 2.0
+                    
+                    # Drowsiness detection - exactly like drowsiness_detection.py
+                    if ear < self.ear_threshold:
+                        self.flag += 1
+                        if self.flag >= self.frame_check:
+                            drowsy = True
+                            cv2.putText(frame, "****************ALERT!****************", (10, 30),
+                                      cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                            cv2.putText(frame, "****************ALERT!****************", (10, 325),
+                                      cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    else:
+                        self.flag = 0
+                    
+                    # Display EAR
+                    cv2.putText(frame, f"EAR: {ear:.2f}", (10, 60),
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                    # Display frame count for debugging
+                    cv2.putText(frame, f"Frame Count: {self.flag}/{self.frame_check}", (10, 90),
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+                    break
+                except Exception as e:
+                    print(f"Error processing face: {e}")
+                    break
+        else:
+            # Reset flag when no face detected
+            if self.flag > 0:
+                self.flag = max(0, self.flag - 1)  # Gradually decrease instead of instant reset
         
         return face_detected, drowsy, frame
 
@@ -1067,32 +1084,68 @@ class HelmetSafetySystem:
     
     def initialize(self):
         """Initialize all system components"""
+        print("=" * 60)
         print("Initializing Mining Helmet Safety System...")
+        print("=" * 60)
         
         # Initialize camera
+        print("\n[1/6] Initializing camera...")
         if not self.camera_manager.initialize():
-            print("Warning: Camera initialization failed. Continuing without camera.")
+            print("  ⚠ Warning: Camera initialization failed. Continuing without camera.")
+        else:
+            print("  ✓ Camera initialized successfully")
         
         # Initialize communication
-        self.hc12.initialize()
+        print("\n[2/6] Initializing HC-12 communication...")
+        if self.hc12.initialize():
+            print(f"  ✓ HC-12 connected on port: {self.hc12.serial_port.port if self.hc12.serial_port else 'unknown'}")
+        else:
+            print("  ⚠ Warning: HC-12 initialization failed. Data transmission will not work.")
+            print("    Make sure HC-12 module is connected and try restarting.")
         
         # Start sensors
+        print("\n[3/6] Starting motion sensors...")
         if Config.ENABLE_MPU6050:
             self.mpu6050.start()
             time.sleep(1)  # Wait for initial readings
             self.sensor_data.calibrate_gyro()
-            print("MPU6050 calibrated")
+            print("  ✓ MPU6050 calibrated and running")
+        else:
+            print("  - MPU6050 disabled in config")
         
+        print("\n[4/6] Starting environmental sensors...")
         if Config.ENABLE_DHT22 or Config.ENABLE_DHT11:
             self.dht.start()
+            print(f"  ✓ DHT sensor ({'DHT22' if Config.ENABLE_DHT22 else 'DHT11'}) started")
+        else:
+            print("  - DHT sensor disabled in config")
         
+        print("\n[5/6] Starting GPS...")
         if Config.ENABLE_GPS:
             self.gps.start()
+            print("  ✓ GPS started")
+        else:
+            print("  - GPS disabled in config")
         
+        print("\n[6/6] Starting gas sensors...")
         if Config.ENABLE_MQ_SENSOR:
             self.mq_sensor.start()
+            print("  ✓ MQ gas sensors started (calibration in progress...)")
+        else:
+            print("  - MQ sensors disabled in config")
         
-        print("System initialization complete")
+        print("\n" + "=" * 60)
+        print("System initialization complete!")
+        print("=" * 60)
+        
+        # Verify critical components
+        if not self.hc12.connected:
+            print("\n⚠ WARNING: HC-12 is not connected. Data will not be transmitted!")
+            print("   Check connections and port permissions.")
+        
+        if not self.drowsiness_detector.detector or not self.drowsiness_detector.predictor:
+            print("\n⚠ WARNING: Face detection models not loaded. Drowsiness detection will not work!")
+        
         return True
     
     def detect_wiggle(self):
@@ -1270,9 +1323,10 @@ class HelmetSafetySystem:
                         self.deactivate_camera()
                         self.activate_buzzer(False)
                     else:
-                        frame = self.camera_manager.read_frame()
+                        # Read raw frame without orientation for processing
+                        frame = self.camera_manager.read_frame(apply_orientation=False)
                         if frame is not None:
-                                # Always run detection on the original upright frame
+                                # Always run detection on the original upright frame (no rotation)
                                 face_detected, drowsy, processed_frame = self.drowsiness_detector.detect_drowsiness(frame)
 
                                 if drowsy:
@@ -1287,17 +1341,8 @@ class HelmetSafetySystem:
                                     # Face detected and not drowsy - keep camera on
                                     self.activate_buzzer(False)
 
-                                # Rotate only for display/output
-                                orientation = Config.CAMERA_ORIENTATION
-                                display_frame = processed_frame
-                                if orientation == 'flip':
-                                    display_frame = cv2.flip(processed_frame, -1)
-                                elif orientation == 'rotate_90':
-                                    display_frame = cv2.rotate(processed_frame, cv2.ROTATE_90_CLOCKWISE)
-                                elif orientation == 'rotate_180':
-                                    display_frame = cv2.rotate(processed_frame, cv2.ROTATE_180)
-                                elif orientation == 'rotate_270':
-                                    display_frame = cv2.rotate(processed_frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                                # Apply orientation only for display/output
+                                display_frame = self.camera_manager._apply_orientation(processed_frame.copy())
                                 cv2.imshow("Mining Helmet Safety System", display_frame)
 
                                 if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -1316,7 +1361,11 @@ class HelmetSafetySystem:
                 now = time.time()
                 if now - self.last_send_time >= 1.0:  # send once per second
                     data = self.sensor_data.get_data()
-                    drowsy_status = 'DROWSY' if 'drowsy' in locals() and drowsy else 'AWAKE'
+                    
+                    # Check drowsiness status from detector flag (works regardless of camera state)
+                    drowsy_status = 'DROWSY' if (self.camera_active and 
+                                                  self.drowsiness_detector.flag >= self.drowsiness_detector.frame_check) else 'AWAKE'
+                    
                     # Assess current danger level
                     danger_level, danger_reasons = self.sensor_data.assess_danger()
                     
@@ -1324,8 +1373,8 @@ class HelmetSafetySystem:
                     message = (
                         f"{drowsy_status},"
                         f"GPS:({data.get('lat', 0):.6f},{data.get('lon', 0):.6f}),"
-                        f"TEMP:{(data.get('temperature') if data.get('temperature') is not None else 0):.1f},"
-                        f"HUM:{(data.get('humidity') if data.get('humidity') is not None else 0):.1f},"
+                        f"TEMP:{(data.get('temperature') if data.get('temperature') is not None and data.get('temperature') != -1 else 0):.1f},"
+                        f"HUM:{(data.get('humidity') if data.get('humidity') is not None and data.get('humidity') != -1 else 0):.1f},"
                         f"METHANE:{data.get('methane_level', 0):.1f},"
                         f"CO:{data.get('co_level', 0):.1f},"
                         f"LPG:{data.get('lpg_level', 0):.1f},"
@@ -1335,16 +1384,26 @@ class HelmetSafetySystem:
                         f"REASONS:{','.join(danger_reasons) if danger_reasons else 'NONE'},"
                         f"TIME:{datetime.now().strftime('%H:%M:%S')}\n"
                     )
+                    
+                    # Ensure HC-12 is connected
                     if not self.hc12.connected:
                         # Attempt (re)initialization if disconnected
+                        print("HC-12 not connected, attempting reinitialization...")
                         self.hc12.initialize()
-                    sent_ok = self.hc12.send_data(message)
-                    if sent_ok:
-                        self.last_send_time = now
+                    
+                    if self.hc12.connected:
+                        sent_ok = self.hc12.send_data(message)
+                        if sent_ok:
+                            self.last_send_time = now
+                            print(f"Data sent: {drowsy_status}, GPS:({data.get('lat', 0):.6f},{data.get('lon', 0):.6f})")  # Debug
+                        else:
+                            # Log once a while to avoid spam
+                            if int(now) % 5 == 0:
+                                print("HC-12: send failed")
                     else:
-                        # Log once a while to avoid spam
+                        # Log connection issues periodically
                         if int(now) % 5 == 0:
-                            print("HC-12: send failed or not connected")
+                            print("HC-12: not connected, cannot send data")
 
                 # Heartbeat blink LED
                 if GPIO_AVAILABLE:
