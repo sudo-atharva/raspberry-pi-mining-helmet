@@ -26,6 +26,7 @@ from scipy.spatial import distance
 from imutils import face_utils
 import imutils
 import numpy as np
+import json
 
 # For logging
 import csv
@@ -943,7 +944,10 @@ class HC12Communication:
             
         try:
             # Format data as a properly structured message
-            message = f"DATA:{data}\n"  # Add proper prefix and terminator
+            message = data if isinstance(data, str) else str(data)
+            if not message.endswith('\n'):
+                message += '\n'
+            print(f"Sending data: {message.strip()}")  # Debug print
             self.serial_port.write(message.encode('utf-8'))
             self.serial_port.flush()  # Ensure data is sent
             return True
@@ -951,23 +955,6 @@ class HC12Communication:
             print(f"HC-12 send error: {e}")
             self.connected = False
             return False
-        """Send data via HC-12"""
-        if self.connected and self.serial_port:
-            try:
-                self.serial_port.write(data.encode())
-                self.serial_port.flush()
-                return True
-            except Exception as e:
-                print(f"HC-12 send error: {e}")
-                # Mark disconnected to trigger reconnect attempts by caller
-                self.connected = False
-                try:
-                    self.serial_port.close()
-                except Exception:
-                    pass
-                self.serial_port = None
-                return False
-        return False
     
     def close(self):
         """Close HC-12 connection"""
@@ -1184,13 +1171,33 @@ class HelmetSafetySystem:
         if current_time - self.last_alert_time < 5:  # Rate limiting
             return
         data = self.sensor_data.get_data()
-        message = (f"{alert_type},GPS:({data['lat']:.6f},{data['lon']:.6f}),"
-                  f"TEMP:{data['temperature']:.1f},HUM:{data['humidity']:.1f},"
-                  f"TIME:{datetime.now().strftime('%H:%M:%S')}")
+        
+        # Format all sensor data in a consistent format
+        message = {
+            'type': 'ALERT',
+            'alert': alert_type,
+            'gps': {'lat': data['lat'], 'lon': data['lon']},
+            'sensors': {
+                'temperature': data['temperature'],
+                'humidity': data['humidity'],
+                'methane': data['methane_level'],
+                'co': data['co_level'],
+                'lpg': data['lpg_level'],
+                'smoke': data['smoke_level']
+            },
+            'motion': {
+                'accel': {'x': data['accel_x'], 'y': data['accel_y'], 'z': data['accel_z']},
+                'gyro': {'x': data['gyro_x'], 'y': data['gyro_y'], 'z': data['gyro_z']}
+            },
+            'time': datetime.now().strftime('%H:%M:%S')
+        }
         if additional_data:
-            message += f",{additional_data}"
-        message += "\n"
-        if self.hc12.send_data(message):
+            message['additional'] = additional_data
+            
+        # Convert to JSON string
+        json_message = json.dumps(message)
+        
+        if self.hc12.send_data(json_message):
             self.last_alert_time = current_time
             print(f"Alert sent: {alert_type}")
             self.log_event("ALERT_SENT", alert_type)
@@ -1211,6 +1218,29 @@ class HelmetSafetySystem:
             print("Gyro calibrated via button!")
             time.sleep(0.5)  # Debounce
     
+    def send_sensor_data(self):
+        """Send current sensor data to boss monitor"""
+        data = self.sensor_data.get_data()
+        danger_level, danger_reasons = self.sensor_data.assess_danger()
+        status = "DROWSY" if self.drowsiness_detector.flag >= self.drowsiness_detector.frame_check else "AWAKE"
+        
+        message = (
+            f"{status},"
+            f"GPS:({data['lat']:.6f},{data['lon']:.6f}),"
+            f"TEMP:{data['temperature']:.1f},"
+            f"HUM:{data['humidity']:.1f},"
+            f"METHANE:{data['methane_level']:.1f},"
+            f"CO:{data['co_level']:.1f},"
+            f"LPG:{data['lpg_level']:.1f},"
+            f"SMOKE:{data['smoke_level']:.1f},"
+            f"AIR_QUALITY:{data['air_quality']:.1f},"
+            f"DANGER:{danger_level},"
+            f"REASONS:{','.join(danger_reasons) if danger_reasons else 'NONE'},"
+            f"TIME:{datetime.now().strftime('%H:%M:%S')}"
+        )
+        
+        self.hc12.send_data(message)
+
     def run(self):
         """Main system loop"""
         if not self.initialize():
@@ -1219,6 +1249,8 @@ class HelmetSafetySystem:
         self.running = True
         print("System ready. Wiggle head to activate camera.")
         print("Press 'q' to quit, 'calibrate' to recalibrate gyro")
+        
+        last_data_send = 0  # Initialize timer for sending data
 
         try:
             while self.running:
