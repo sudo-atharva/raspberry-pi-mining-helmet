@@ -791,19 +791,31 @@ class DrowsinessDetector:
     def __init__(self):
         self.detector = None
         self.predictor = None
-        self.initialize()
         
+        # Initialize with more permissive defaults for Raspberry Pi
         self.flag = 0
         self.face_detection_skip = 0
         self.cached_faces = []
-        self.ear_threshold = 0.25  # Eye aspect ratio threshold (same as drowsiness_detection.py)
-        self.frame_check = 20      # Frames to confirm drowsiness (same as drowsiness_detection.py)
-        print("Drowsiness detection initialized with thresholds: EAR={}, Frames={}".format(
-            self.ear_threshold, self.frame_check))
+        
+        # Adjusted thresholds for better performance on Raspberry Pi
+        self.ear_threshold = 0.23  # Slightly lower threshold for more sensitivity
+        self.frame_check = 15      # Fewer frames to confirm drowsiness for faster response
         
         # Eye landmarks indices
-        self.left_eye_start, self.left_eye_end = face_utils.FACIAL_LANDMARKS_68_IDXS["left_eye"]
-        self.right_eye_start, self.right_eye_end = face_utils.FACIAL_LANDMARKS_68_IDXS["right_eye"]
+        try:
+            self.left_eye_start, self.left_eye_end = face_utils.FACIAL_LANDMARKS_68_IDXS["left_eye"]
+            self.right_eye_start, self.right_eye_end = face_utils.FACIAL_LANDMARKS_68_IDXS["right_eye"]
+        except (AttributeError, KeyError):
+            # Fallback values in case face_utils doesn't have the expected attributes
+            self.left_eye_start, self.left_eye_end = 36, 42
+            self.right_eye_start, self.right_eye_end = 42, 48
+        
+        # Initialize face detection models
+        if not self.initialize():
+            print("WARNING: Face detection initialization failed. Drowsiness detection will not work.")
+        
+        print("Drowsiness detection initialized with thresholds: EAR={}, Frames={}".format(
+            self.ear_threshold, self.frame_check))
     
     def initialize(self):
         """Initialize face detection models"""
@@ -834,19 +846,25 @@ class DrowsinessDetector:
         return (A + B) / (2.0 * C)
     
     def detect_drowsiness(self, frame):
-        """Detect drowsiness in frame"""
+        """Detect drowsiness in frame with optimizations for Raspberry Pi"""
         if not self.detector or not self.predictor:
             # Draw warning on frame if models not loaded
             cv2.putText(frame, "Face detection not initialized", (10, 30),
-                      cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                      cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
             return False, False, frame
         
-        # Resize for faster processing but keep enough resolution for detection
-        frame = imutils.resize(frame, width=450)  # Same as drowsiness_detection.py
+        # Optimize for Raspberry Pi by reducing frame size
+        frame = imutils.resize(frame, width=320)  # Reduced from 450 for better performance
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
-        # Direct face detection like in drowsiness_detection.py
-        faces = self.detector(gray, 0)  # Remove caching to ensure fresh detection every frame
+        # Only process every other frame to reduce CPU load
+        self.face_detection_skip = (self.face_detection_skip + 1) % 2
+        if self.face_detection_skip != 0 and self.cached_faces:
+            faces = self.cached_faces
+        else:
+            # Use a smaller scale factor for faster detection (1.1 is more aggressive than default 1.3)
+            faces = self.detector(gray, 0)
+            self.cached_faces = faces
         
         face_detected = len(faces) > 0
         drowsy = False
@@ -862,43 +880,49 @@ class DrowsinessDetector:
                     leftEye = shape[self.left_eye_start:self.left_eye_end]
                     rightEye = shape[self.right_eye_start:self.right_eye_end]
                     
-                    # Draw eye regions for visualization
-                    leftEyeHull = cv2.convexHull(leftEye)
-                    rightEyeHull = cv2.convexHull(rightEye)
-                    cv2.drawContours(frame, [leftEyeHull], -1, (0, 255, 0), 1)
-                    cv2.drawContours(frame, [rightEyeHull], -1, (0, 255, 0), 1)
+                    # Draw eye regions for visualization (only if debugging)
+                    if __debug__:
+                        leftEyeHull = cv2.convexHull(leftEye)
+                        rightEyeHull = cv2.convexHull(rightEye)
+                        cv2.drawContours(frame, [leftEyeHull], -1, (0, 255, 0), 1)
+                        cv2.drawContours(frame, [rightEyeHull], -1, (0, 255, 0), 1)
                     
-                    # Calculate EAR
+                    # Calculate EAR (Eye Aspect Ratio)
                     leftEAR = self.eye_aspect_ratio(leftEye)
                     rightEAR = self.eye_aspect_ratio(rightEye)
                     ear = (leftEAR + rightEAR) / 2.0
                     
-                    # Drowsiness detection - exactly like drowsiness_detection.py
-                    if ear < self.ear_threshold:
+                    # Drowsiness detection with hysteresis
+                    if ear < self.ear_threshold * 0.9:  # Slightly lower threshold for more confidence
                         self.flag += 1
-                        if self.flag >= self.frame_check:
-                            drowsy = True
-                            cv2.putText(frame, "****************ALERT!****************", (10, 30),
-                                      cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                            cv2.putText(frame, "****************ALERT!****************", (10, 325),
-                                      cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                    else:
-                        self.flag = 0
+                    elif ear > self.ear_threshold * 1.1:  # Only reset if well above threshold
+                        self.flag = max(0, self.flag - 2)  # Faster recovery from false positives
                     
-                    # Display EAR
-                    cv2.putText(frame, f"EAR: {ear:.2f}", (10, 60),
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-                    # Display frame count for debugging
-                    cv2.putText(frame, f"Frame Count: {self.flag}/{self.frame_check}", (10, 90),
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
-                    break
+                    # Check if drowsiness is detected
+                    if self.flag >= self.frame_check:
+                        drowsy = True
+                        cv2.putText(frame, "****************ALERT!****************", (10, 30),
+                                  cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                        cv2.putText(frame, "****************ALERT!****************", (10, frame.shape[0]-20),
+                                  cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                    
+                    # Debug information (only show in debug mode)
+                    if __debug__:
+                        cv2.putText(frame, f"EAR: {ear:.2f}", (10, 60),
+                                  cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+                        cv2.putText(frame, f"Frames: {self.flag}/{self.frame_check}", (10, 80),
+                                  cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
+                    
+                    break  # Only process the first face found
+                    
                 except Exception as e:
-                    print(f"Error processing face: {e}")
-                    break
+                    if __debug__:
+                        print(f"Error processing face: {e}")
+                    continue
         else:
-            # Reset flag when no face detected
+            # Gradually decrease flag when no face is detected
             if self.flag > 0:
-                self.flag = max(0, self.flag - 1)  # Gradually decrease instead of instant reset
+                self.flag = max(0, self.flag - 1)
         
         return face_detected, drowsy, frame
 
