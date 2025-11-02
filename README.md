@@ -109,44 +109,70 @@ The system consists of the following modules:
 
 ---
 
-## Usage
+...existing code...
 
-- **Main Program:**
   ```bash
   python main.py
   ```
 - **Individual Sensor Tests:**
   - `ads1115_check.py`, `dht11_check.py`, `gps_check.py`, etc. can be run to test individual modules.
 - **GUI Dashboard:**
-  - Run `boss_monitor_gui.py` for the graphical interface.
-- **Alert Logs:**
-  - All alerts are saved in `alerts_log.csv` for later review.
-
 ---
 
-## Data Flow & Alert System
-
-1. **Sensor Data Acquisition:** Sensors collect data at regular intervals.
 2. **Processing:** Data is processed on the Raspberry Pi. Drowsiness is detected using camera and dlib model.
 3. **Threshold Checking:** If any parameter exceeds safe limits (e.g., high CO, drowsiness detected), an alert is generated.
-4. **Alert Transmission:** Alerts are sent wirelessly to a remote station and logged locally.
 5. **Visualization:** GUI displays live sensor data and alert history.
-
----
-
-## Results & Performance
 
 - **Gas Detection:** Detected CO and CH₄ at concentrations as low as 10 ppm.
 - **Temperature/Humidity:** Accurate readings with ±2% error.
-- **Drowsiness Detection:** 92% accuracy in controlled tests.
-- **Wireless Alerts:** Alerts received within 2 seconds at 100m range.
-- **GUI:** Real-time updates and clear visualization.
-
----
 
 ## Screenshots & Diagrams
 
 *Insert photos of the helmet, GUI screenshots, and system diagrams here.*
+
+## Wiring Diagram & Connections
+
+Below is a summary of typical wiring for the main components. Always refer to each sensor/module datasheet for exact pinouts.
+
+### MQ-series Gas Sensors (e.g., MQ-2, MQ-7)
+- **VCC** → 5V (Pin 2 or 4)
+- **GND** → GND (Pin 6, 9, 14, etc.)
+- **Analog Out** → ADC (e.g., ADS1115 module, connect SDA/SCL to Pi I2C)
+- **Digital Out** (optional) → GPIO (e.g., GPIO17)
+
+### DHT11/DHT22 Temperature & Humidity Sensor
+- **VCC** → 3.3V (Pin 1 or 17)
+- **GND** → GND
+- **Data** → GPIO4 (Pin 7) (with 10k pull-up resistor to VCC)
+
+### Camera Module
+- **CSI Connector** → Raspberry Pi CSI port
+
+### GPS Module (NEO-6M)
+- **VCC** → 3.3V or 5V (check module spec)
+- **GND** → GND
+- **TX** → GPIO15 (RXD, Pin 10)
+- **RX** → GPIO14 (TXD, Pin 8)
+
+### HC-12 Wireless Serial Module
+- **VCC** → 3.3V or 5V (check module spec)
+- **GND** → GND
+- **TXD** → GPIO15 (RXD, Pin 10)
+- **RXD** → GPIO14 (TXD, Pin 8)
+- **SET** → Leave floating or connect to GND for normal mode
+
+### Example Wiring Table
+
+| Module         | VCC   | GND   | Data/Signal Pin      | Pi GPIO Pin |
+|--------------- |-------|-------|----------------------|-------------|
+| MQ Gas Sensor  | 5V    | GND   | ADC/SDA/SCL/Digital  | GPIO17      |
+| DHT11/DHT22    | 3.3V  | GND   | Data                 | GPIO4       |
+| GPS (NEO-6M)   | 3.3V  | GND   | TX → RXD, RX → TXD   | GPIO15/14   |
+| HC-12          | 3.3V  | GND   | TXD → RXD, RXD → TXD | GPIO15/14   |
+| Camera         | CSI   | CSI   | -                    | CSI Port    |
+
+*For a visual diagram, see the datasheets or use Fritzing to create a schematic.*
+
 
 ---
 
@@ -156,7 +182,6 @@ The system consists of the following modules:
 - Limited wireless range (can be improved with mesh networking).
 - Power optimization and miniaturization needed for long-term use.
 - Future work: Cloud integration, predictive analytics, and additional sensors (e.g., heart rate).
-
 ---
 
 ## References
