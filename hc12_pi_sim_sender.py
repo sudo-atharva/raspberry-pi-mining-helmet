@@ -58,7 +58,6 @@ def open_serial(port: str, baud: int) -> serial.Serial:
 
 def make_telemetry(t0: float, i: int):
     # Create plausible changing values
-    # GPS: small walk around a base coordinate
     base_lat, base_lon = 19.0760, 72.8777  # Mumbai (example)
     lat = base_lat + 0.0001 * math.sin(i / 120.0)
     lon = base_lon + 0.0001 * math.cos(i / 120.0)
@@ -74,34 +73,11 @@ def make_telemetry(t0: float, i: int):
 
     air_quality = max(0.0, min(100.0, 100.0 - (methane / 10.0) - (co / 5.0) - (lpg / 10.0) - (smoke / 10.0)))
 
-    danger = "SAFE"
-    reasons = []
-    if methane > 1000:
-        danger = "CRITICAL"; reasons.append("HIGH_METHANE")
-    if co > 50:
-        danger = "CRITICAL"; reasons.append("HIGH_CO")
-    if lpg > 1000:
-        danger = "CRITICAL"; reasons.append("HIGH_LPG")
-    if smoke > 500 and danger != "CRITICAL":
-        danger = "WARNING"; reasons.append("SMOKE_DETECTED")
-    if temperature > 35 and danger != "CRITICAL":
-        danger = "WARNING"; reasons.append("HIGH_TEMP")
-
     status = "AWAKE" if (i % 100) < 80 else "DROWSY"  # sometimes drowsy
 
+    # Compact CSV: <S>,<lat>,<lon>,<temp>,<hum>,<methane>,<co>,<lpg>,<smoke>,<air_quality>
     line = (
-        f"{status},"
-        f"GPS:({lat:.6f},{lon:.6f}),"
-        f"TEMP:{temperature:.1f},"
-        f"HUM:{humidity:.1f},"
-        f"METHANE:{methane:.1f},"
-        f"CO:{co:.1f},"
-        f"LPG:{lpg:.1f},"
-        f"SMOKE:{smoke:.1f},"
-        f"AIR_QUALITY:{air_quality:.1f},"
-        f"DANGER:{danger},"
-        f"REASONS:{','.join(reasons) if reasons else 'NONE'},"
-        f"TIME:{datetime.now().strftime('%H:%M:%S')}"
+        f"{status[0]},{lat:.4f},{lon:.4f},{temperature:.1f},{humidity:.1f},{methane:.0f},{co:.0f},{lpg:.0f},{smoke:.0f},{air_quality:.0f}"
     )
     return line
 
@@ -168,15 +144,16 @@ def main():
                 print(f"Write error: {e}")
                 break
 
-            alert = make_alert(i)
-            if alert:
-                try:
-                    ser.write((alert + "\n").encode("utf-8"))
-                    ser.flush()
-                    print(f"TX: {alert}")
-                except Exception as e:
-                    print(f"Write error(alert): {e}")
-                    break
+            # Optional: skip JSON alerts in compact mode to minimize payload
+            # alert = make_alert(i)
+            # if alert:
+            #     try:
+            #         ser.write((alert + "\n").encode("utf-8"))
+            #         ser.flush()
+            #         print(f"TX: {alert}")
+            #     except Exception as e:
+            #         print(f"Write error(alert): {e}")
+            #         break
 
             i += 1
             time.sleep(interval)

@@ -1219,26 +1219,20 @@ class HelmetSafetySystem:
             time.sleep(0.5)  # Debounce
     
     def send_sensor_data(self):
-        """Send current sensor data to boss monitor"""
+        """Send current sensor data in compact CSV: S,lat,lon,temp,hum,ch4,co,lpg,smoke,aqi"""
         data = self.sensor_data.get_data()
-        danger_level, danger_reasons = self.sensor_data.assess_danger()
         status = "DROWSY" if self.drowsiness_detector.flag >= self.drowsiness_detector.frame_check else "AWAKE"
-        
-        message = (
-            f"{status},"
-            f"GPS:({data['lat']:.6f},{data['lon']:.6f}),"
-            f"TEMP:{data['temperature']:.1f},"
-            f"HUM:{data['humidity']:.1f},"
-            f"METHANE:{data['methane_level']:.1f},"
-            f"CO:{data['co_level']:.1f},"
-            f"LPG:{data['lpg_level']:.1f},"
-            f"SMOKE:{data['smoke_level']:.1f},"
-            f"AIR_QUALITY:{data['air_quality']:.1f},"
-            f"DANGER:{danger_level},"
-            f"REASONS:{','.join(danger_reasons) if danger_reasons else 'NONE'},"
-            f"TIME:{datetime.now().strftime('%H:%M:%S')}"
-        )
-        
+        # Clamp to sensible defaults if None
+        lat = data.get('lat', 0.0) or 0.0
+        lon = data.get('lon', 0.0) or 0.0
+        temp = data.get('temperature', 0.0) or 0.0
+        hum = data.get('humidity', 0.0) or 0.0
+        ch4 = data.get('methane_level', 0.0) or 0.0
+        co = data.get('co_level', 0.0) or 0.0
+        lpg = data.get('lpg_level', 0.0) or 0.0
+        smoke = data.get('smoke_level', 0.0) or 0.0
+        aqi = data.get('air_quality', 100.0) or 0.0
+        message = f"{status[0]},{lat:.4f},{lon:.4f},{temp:.1f},{hum:.1f},{ch4:.0f},{co:.0f},{lpg:.0f},{smoke:.0f},{aqi:.0f}"
         self.hc12.send_data(message)
 
     def run(self):
@@ -1317,32 +1311,23 @@ class HelmetSafetySystem:
                 if now - self.last_send_time >= 1.0:  # send once per second
                     data = self.sensor_data.get_data()
                     drowsy_status = 'DROWSY' if 'drowsy' in locals() and drowsy else 'AWAKE'
-                    # Assess current danger level
-                    danger_level, danger_reasons = self.sensor_data.assess_danger()
-                    
-                    # Compose comprehensive message for boss monitor
-                    message = (
-                        f"{drowsy_status},"
-                        f"GPS:({data.get('lat', 0):.6f},{data.get('lon', 0):.6f}),"
-                        f"TEMP:{(data.get('temperature') if data.get('temperature') is not None else 0):.1f},"
-                        f"HUM:{(data.get('humidity') if data.get('humidity') is not None else 0):.1f},"
-                        f"METHANE:{data.get('methane_level', 0):.1f},"
-                        f"CO:{data.get('co_level', 0):.1f},"
-                        f"LPG:{data.get('lpg_level', 0):.1f},"
-                        f"SMOKE:{data.get('smoke_level', 0):.1f},"
-                        f"AIR_QUALITY:{data.get('air_quality', 100):.1f},"
-                        f"DANGER:{danger_level},"
-                        f"REASONS:{','.join(danger_reasons) if danger_reasons else 'NONE'},"
-                        f"TIME:{datetime.now().strftime('%H:%M:%S')}\n"
-                    )
+                    lat = data.get('lat', 0.0) or 0.0
+                    lon = data.get('lon', 0.0) or 0.0
+                    temp = (data.get('temperature') if data.get('temperature') is not None else 0.0) or 0.0
+                    hum = (data.get('humidity') if data.get('humidity') is not None else 0.0) or 0.0
+                    ch4 = data.get('methane_level', 0.0) or 0.0
+                    co = data.get('co_level', 0.0) or 0.0
+                    lpg = data.get('lpg_level', 0.0) or 0.0
+                    smoke = data.get('smoke_level', 0.0) or 0.0
+                    aqi = data.get('air_quality', 100.0) or 0.0
+                    # Compact message: first letter of status
+                    message = f"{drowsy_status[0]},{lat:.4f},{lon:.4f},{temp:.1f},{hum:.1f},{ch4:.0f},{co:.0f},{lpg:.0f},{smoke:.0f},{aqi:.0f}"
                     if not self.hc12.connected:
-                        # Attempt (re)initialization if disconnected
                         self.hc12.initialize()
                     sent_ok = self.hc12.send_data(message)
                     if sent_ok:
                         self.last_send_time = now
                     else:
-                        # Log once a while to avoid spam
                         if int(now) % 5 == 0:
                             print("HC-12: send failed or not connected")
 
