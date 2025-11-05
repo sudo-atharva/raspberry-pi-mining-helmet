@@ -163,14 +163,19 @@ class SerialReader(QtCore.QObject):
         self._ser = None
         self.disconnected.emit()
     
-    def _is_valid_line_start(self, text: str) -> bool:
-        """Check if a line starts with valid message patterns"""
-        # Valid starts: AWAKE, DROWSY, or JSON object
+        def _is_valid_line_start(self, text: str) -> bool:
+            """Check if a line starts with valid message patterns"""
+        # Valid starts: AWAKE, DROWSY, JSON object, or S: lines
         if text.startswith('AWAKE,') or text.startswith('DROWSY,'):
             return True
-        if text.startswith('{') and '"type"' in text:
+        if text.startswith('{'):
+            # Accept any JSON object start. We won't require a "type" key here
+            return True
+        # Accept simple status-style prefixes like S: or A:
+        if text.startswith('S:') or text.startswith('A:'):
             return True
         return False
+
 
 
 class LogModel(QtCore.QAbstractTableModel):
@@ -271,15 +276,31 @@ class LogModel(QtCore.QAbstractTableModel):
 
 def parse_line(text: str) -> ParsedReading:
     ts = time.time()
-    # Try JSON first
+       # Try JSON first
     try:
         obj = json.loads(text)
-        if isinstance(obj, dict) and obj.get("type") == "ALERT":
-            r = ParsedReading(raw=text, timestamp=ts, is_json_alert=True)
-            r.alert_type = obj.get("alert")
+        if isinstance(obj, dict):
+            # If it's an ALERT object with explicit type, keep is_json_alert True
+            if obj.get("type") == "ALERT":
+                r = ParsedReading(raw=text, timestamp=ts, is_json_alert=True)
+                r.alert_type = obj.get("alert")
+            else:
+                # Generic sensor JSON (no explicit type)
+                r = ParsedReading(raw=text, timestamp=ts, is_json_alert=False)
+
+            # GPS (could be under keys 'gps' or 'lat'/'lon')
             gps = obj.get("gps") or {}
-            if isinstance(gps, dict):
+            if isinstance(gps, dict) and ("lat" in gps or "lon" in gps):
                 r.gps = {"lat": gps.get("lat", 0), "lon": gps.get("lon", 0)}
+            else:
+                # fallback: top-level lat/lon fields
+                if "lat" in obj and "lon" in obj:
+                    try:
+                        r.gps = {"lat": float(obj.get("lat")), "lon": float(obj.get("lon"))}
+                    except Exception:
+                        pass
+
+            # Sensors block
             sensors = obj.get("sensors") or {}
             if isinstance(sensors, dict):
                 r.temperature = sensors.get("temperature")
@@ -288,25 +309,55 @@ def parse_line(text: str) -> ParsedReading:
                 r.co = sensors.get("co")
                 r.lpg = sensors.get("lpg")
                 r.smoke = sensors.get("smoke")
-            motion = obj.get("motion") or {}
-            # motion not displayed in columns but preserved in raw
+                # optional: compute air_quality if present
+                r.air_quality = sensors.get("air_quality") or sensors.get("aqi") or r.air_quality
+
+            # Danger / reasons fields if present
+            if "danger" in obj:
+                r.danger = obj.get("danger")
+            if "reasons" in obj:
+                reasons = obj.get("reasons")
+                if isinstance(reasons, list):
+                    r.reasons = reasons
+                elif isinstance(reasons, str) and reasons and reasons != "NONE":
+                    r.reasons = [s for s in reasons.replace(";", ",").split(",") if s.strip()]
+
+            # preserve motion and time in raw — no need to explode motion fields into columns now
             return r
     except Exception:
         pass
 
+
     # Parse structured text like:
     # AWAKE,GPS:(xx.xxxxxx,yy.yyyyyy),TEMP:..,HUM:..,METHANE:..,CO:..,LPG:..,SMOKE:..,AIR_QUALITY:..,DANGER:..,REASONS:..,TIME:..
+    # Also handles S:NONE,A:NONE style lines
     r = ParsedReading(raw=text, timestamp=ts)
     try:
-        parts = [p.strip() for p in text.split(',')]
+        parts = [p.strip() for p in text.split(',') if p.strip()]
         if not parts:
             return r
-        # First token is status (AWAKE/DROWSY)
-        r.status = parts[0] if parts[0] else None
+
+        first = parts[0]
+
+        # ✅ Handle "S:NONE", "A:NONE", etc.
+        if ':' in first:
+            key, val = first.split(':', 1)
+            key = key.strip().upper()
+            val = val.strip()
+            if key in ("S", "A", "STATUS", "ALERT"):
+                r.status = val
+            else:
+                # fallback to store as raw
+                r.status = first
+        else:
+            # for plain words like AWAKE or DROWSY
+            r.status = first if first else None
+
+        # Now continue with the rest of your existing parsing
         for p in parts[1:]:
             if p.startswith("GPS:(") and p.endswith(")"):
                 try:
-                    coords = p[len("GPS:("): -1]
+                    coords = p[len("GPS:("):-1]
                     lat_s, lon_s = coords.split(')')[0].split(',') if ')' in coords else coords.split(',')
                     r.gps = {"lat": float(lat_s), "lon": float(lon_s)}
                 except Exception:
@@ -358,6 +409,7 @@ def parse_line(text: str) -> ParsedReading:
         # Leave as raw
         pass
     return r
+
 
 
 class MainWindow(QtWidgets.QMainWindow):
