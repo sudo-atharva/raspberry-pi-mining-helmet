@@ -162,9 +162,9 @@ class SerialReader(QtCore.QObject):
             pass
         self._ser = None
         self.disconnected.emit()
-    
-        def _is_valid_line_start(self, text: str) -> bool:
-            """Check if a line starts with valid message patterns"""
+
+    def _is_valid_line_start(self, text: str) -> bool:
+        """Check if a line starts with valid message patterns"""
         # Valid starts: AWAKE, DROWSY, JSON object, or S: lines
         if text.startswith('AWAKE,') or text.startswith('DROWSY,'):
             return True
@@ -276,7 +276,7 @@ class LogModel(QtCore.QAbstractTableModel):
 
 def parse_line(text: str) -> ParsedReading:
     ts = time.time()
-       # Try JSON first
+    # Try JSON first
     try:
         obj = json.loads(text)
         if isinstance(obj, dict):
@@ -364,37 +364,37 @@ def parse_line(text: str) -> ParsedReading:
                     pass
             elif p.startswith("TEMP:"):
                 try:
-                    r.temperature = float(p.split(":", 1)[1])
+                    r.temperature = float(str(p.split(":", 1)[1]).strip())
                 except Exception:
                     pass
             elif p.startswith("HUM:"):
                 try:
-                    r.humidity = float(p.split(":", 1)[1])
+                    r.humidity = float(str(p.split(":", 1)[1]).strip())
                 except Exception:
                     pass
             elif p.startswith("METHANE:"):
                 try:
-                    r.methane = float(p.split(":", 1)[1])
+                    r.methane = float(str(p.split(":", 1)[1]).strip())
                 except Exception:
                     pass
             elif p.startswith("CO:"):
                 try:
-                    r.co = float(p.split(":", 1)[1])
+                    r.co = float(str(p.split(":", 1)[1]).strip())
                 except Exception:
                     pass
             elif p.startswith("LPG:"):
                 try:
-                    r.lpg = float(p.split(":", 1)[1])
+                    r.lpg = float(str(p.split(":", 1)[1]).strip())
                 except Exception:
                     pass
             elif p.startswith("SMOKE:"):
                 try:
-                    r.smoke = float(p.split(":", 1)[1])
+                    r.smoke = float(str(p.split(":", 1)[1]).strip())
                 except Exception:
                     pass
             elif p.startswith("AIR_QUALITY:"):
                 try:
-                    r.air_quality = float(p.split(":", 1)[1])
+                    r.air_quality = float(str(p.split(":", 1)[1]).strip())
                 except Exception:
                     pass
             elif p.startswith("DANGER:"):
