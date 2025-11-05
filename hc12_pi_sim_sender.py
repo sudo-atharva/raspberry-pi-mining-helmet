@@ -35,8 +35,8 @@ DEFAULT_BAUD = 9600
 
 
 def find_default_port():
-    # Try common candidates and detected ports
-    candidates = ["/dev/ttyUSB0"]
+    """Find a default serial port from common candidates."""
+    candidates = ["/dev/ttyUSB0", "/dev/ttyS0", "/dev/ttyAMA0"]
     try:
         for p in serial.tools.list_ports.comports():
             if p.device not in candidates:
@@ -53,10 +53,12 @@ def find_default_port():
 
 
 def open_serial(port: str, baud: int) -> serial.Serial:
+    """Open serial connection with proper settings."""
     return serial.Serial(port, baud, timeout=1)
 
 
 def make_telemetry(t0: float, i: int):
+    """Generate simulated telemetry data in CSV format."""
     # Create plausible changing values
     base_lat, base_lon = 19.0760, 72.8777  # Mumbai (example)
     lat = base_lat + 0.0001 * math.sin(i / 120.0)
@@ -77,30 +79,33 @@ def make_telemetry(t0: float, i: int):
 
     # Compact CSV: <S>,<lat>,<lon>,<temp>,<hum>,<methane>,<co>,<lpg>,<smoke>,<air_quality>
     line = (
-        f"{status[0]},{lat:.4f},{lon:.4f},{temperature:.1f},{humidity:.1f},{methane:.0f},{co:.0f},{lpg:.0f},{smoke:.0f},{air_quality:.0f}"
+        f"{status[0]},{lat:.4f},{lon:.4f},{temperature:.1f},{humidity:.1f},"
+        f"{methane:.0f},{co:.0f},{lpg:.0f},{smoke:.0f},{air_quality:.0f}"
     )
     return line
 
 
 def make_alert(i: int):
-    # Occasionally produce alerts similar to HelmetSafetySystem.send_alert
-    alert_type = random.choice(["DROWSY", "NO_FACE"]) if (i % 30 == 0) else None
-    if not alert_type:
+    """Generate occasional alert messages in JSON format."""
+    # Produce alerts every 30 iterations
+    if i % 30 != 0:
         return None
+    
+    alert_type = random.choice(["DROWSY", "NO_FACE"])
     lat = 19.0760 + 0.0001 * math.sin(i / 120.0)
     lon = 72.8777 + 0.0001 * math.cos(i / 120.0)
     sensors = {
-        "temperature": 26.0 + 2.0 * math.sin(i / 30.0),
-        "humidity": 55.0 + 5.0 * math.cos(i / 40.0),
-        "methane": 150.0 + random.uniform(-10, 10),
-        "co": 15.0 + random.uniform(-2, 2),
-        "lpg": 70.0 + random.uniform(-5, 5),
-        "smoke": 45.0 + random.uniform(-4, 4),
+        "temperature": round(26.0 + 2.0 * math.sin(i / 30.0), 1),
+        "humidity": round(55.0 + 5.0 * math.cos(i / 40.0), 1),
+        "methane": round(150.0 + random.uniform(-10, 10), 0),
+        "co": round(15.0 + random.uniform(-2, 2), 0),
+        "lpg": round(70.0 + random.uniform(-5, 5), 0),
+        "smoke": round(45.0 + random.uniform(-4, 4), 0),
     }
     obj = {
         "type": "ALERT",
         "alert": alert_type,
-        "gps": {"lat": lat, "lon": lon},
+        "gps": {"lat": round(lat, 4), "lon": round(lon, 4)},
         "sensors": sensors,
         "motion": {
             "accel": {"x": 0.0, "y": 0.0, "z": 1.0},
@@ -130,11 +135,13 @@ def main():
         print(f"Failed to open {port}: {e}")
         sys.exit(2)
 
-    interval = 5.0 / max(0.1, args.hz)
+    interval = 1.0 / max(0.1, args.hz)  # Fixed: was 5.0 / hz
     i = 0
     t0 = time.time()
+    
     try:
         while True:
+            # Send telemetry
             line = make_telemetry(t0, i)
             try:
                 ser.write((line + "\n").encode("utf-8"))
@@ -144,24 +151,26 @@ def main():
                 print(f"Write error: {e}")
                 break
 
-            # Optional: skip JSON alerts in compact mode to minimize payload
-            # alert = make_alert(i)
-            # if alert:
-            #     try:
-            #         ser.write((alert + "\n").encode("utf-8"))
-            #         ser.flush()
-            #         print(f"TX: {alert}")
-            #     except Exception as e:
-            #         print(f"Write error(alert): {e}")
-            #         break
+            # Send alerts occasionally
+            alert = make_alert(i)
+            if alert:
+                try:
+                    ser.write((alert + "\n").encode("utf-8"))
+                    ser.flush()
+                    print(f"TX: {alert}")
+                except Exception as e:
+                    print(f"Write error(alert): {e}")
+                    break
 
             i += 1
             time.sleep(interval)
+            
     except KeyboardInterrupt:
-        print("Stopping...")
+        print("\nStopping...")
     finally:
         try:
             ser.close()
+            print("Serial port closed.")
         except Exception:
             pass
 
