@@ -72,6 +72,7 @@ class SerialReader(QtCore.QObject):
         self._ser: Optional[serial.Serial] = None
         self._current_port = None
         self._baud = DEFAULT_BAUD
+        self._synchronized = False  # Track if we're synchronized to complete messages
 
     def list_ports(self) -> List[str]:
         ports = []
@@ -90,6 +91,7 @@ class SerialReader(QtCore.QObject):
         self._baud = baud
         self._current_port = port
         self._stop.clear()
+        self._synchronized = False  # Reset synchronization flag on new connection
         if self._thread and self._thread.is_alive():
             self.disconnect()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
@@ -127,7 +129,20 @@ class SerialReader(QtCore.QObject):
                             text = line.decode(LINE_ENCODING, errors="replace").strip()
                         except Exception:
                             text = line.decode("latin1", errors="replace").strip()
-                        if text:
+                        
+                        if not text:
+                            continue
+                        
+                        # Synchronization: discard partial/corrupt lines until we get a valid start
+                        if not self._synchronized:
+                            if self._is_valid_line_start(text):
+                                self._synchronized = True
+                                print(f"[SYNC] Synchronized on: {text[:50]}...")
+                                self.line_received.emit(text)
+                            else:
+                                print(f"[SYNC] Discarding partial line: {text[:50]}...")
+                        else:
+                            # Already synchronized - process all lines
                             self.line_received.emit(text)
                 else:
                     time.sleep(0.01)
@@ -147,6 +162,15 @@ class SerialReader(QtCore.QObject):
             pass
         self._ser = None
         self.disconnected.emit()
+    
+    def _is_valid_line_start(self, text: str) -> bool:
+        """Check if a line starts with valid message patterns"""
+        # Valid starts: AWAKE, DROWSY, or JSON object
+        if text.startswith('AWAKE,') or text.startswith('DROWSY,'):
+            return True
+        if text.startswith('{') and '"type"' in text:
+            return True
+        return False
 
 
 class LogModel(QtCore.QAbstractTableModel):
