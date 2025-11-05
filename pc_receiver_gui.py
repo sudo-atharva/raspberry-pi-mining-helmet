@@ -72,32 +72,35 @@ class SerialReader(QtCore.QObject):
         self._ser: Optional[serial.Serial] = None
         self._current_port = None
         self._baud = DEFAULT_BAUD
-        self._synchronized = False  # Track if we're synchronized to complete messages
+        self._synchronized = False
 
     def list_ports(self) -> List[str]:
+        """List available serial ports."""
         ports = []
         try:
             for p in serial.tools.list_ports.comports():
                 ports.append(p.device)
         except Exception:
             pass
-        # Reasonable defaults on Linux/Windows
+        # Add common Linux ports if they exist
         for cand in ["/dev/ttyUSB0", "/dev/ttyUSB1", "/dev/ttyACM0", "/dev/ttyS0"]:
             if cand not in ports and os.path.exists(cand):
                 ports.append(cand)
         return ports
 
     def connect(self, port: str, baud: int = DEFAULT_BAUD):
+        """Start connection to serial port."""
         self._baud = baud
         self._current_port = port
         self._stop.clear()
-        self._synchronized = False  # Reset synchronization flag on new connection
+        self._synchronized = False
         if self._thread and self._thread.is_alive():
             self.disconnect()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
 
     def disconnect(self):
+        """Stop serial connection."""
         self._stop.set()
         if self._ser and self._ser.is_open:
             try:
@@ -105,10 +108,12 @@ class SerialReader(QtCore.QObject):
             except Exception:
                 pass
         self._ser = None
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
         self.disconnected.emit()
 
     def _run_loop(self):
-        # Open serial
+        """Main serial reading loop."""
         try:
             self._ser = serial.Serial(self._current_port, self._baud, timeout=0.2)
             self.connected.emit(self._current_port)
@@ -133,20 +138,12 @@ class SerialReader(QtCore.QObject):
                         if not text:
                             continue
                         
-                        # Synchronization: be permissive but try to align on sane line starts.
+                        # Synchronization logic
                         if not self._synchronized:
-                            if self._is_valid_line_start(text) or self._looks_like_kv_line(text):
+                            if self._is_valid_line_start(text):
                                 self._synchronized = True
                                 self.line_received.emit(text)
-                            else:
-                                # if line contains typical sensor tokens, accept anyway
-                                if any(tok in text.upper() for tok in ["TEMP", "HUM", "METHANE", "CO", "LPG", "SMOKE", "AQI", "AIR_QUALITY", "GPS", "AWAKE", "DROWSY", "S:", "A:"]):
-                                    self._synchronized = True
-                                    self.line_received.emit(text)
-                                else:
-                                    pass
                         else:
-                            # Already synchronized - process all lines
                             self.line_received.emit(text)
                 else:
                     time.sleep(0.01)
@@ -154,8 +151,7 @@ class SerialReader(QtCore.QObject):
                 self.port_error.emit(f"Serial error: {e}")
                 break
             except Exception as e:
-                self.port_error.emit(f"Read error: {e}")
-                # keep loop running; transient errors may occur
+                # Log but continue on transient errors
                 time.sleep(0.1)
 
         # Cleanup
@@ -168,20 +164,28 @@ class SerialReader(QtCore.QObject):
         self.disconnected.emit()
 
     def _is_valid_line_start(self, text: str) -> bool:
-        """Check if a line starts with valid message patterns"""
+        """Check if line appears to be valid telemetry data."""
         t = text.strip()
-        # Valid starts: AWAKE, DROWSY, JSON object, or S:/A:/STATUS:/ALERT: lines, or TEMP/HUM prefixed
-        if t.startswith('AWAKE') or t.startswith('DROWSY'):
-            return True
+        # CSV format: A,19.0760,72.8777,26.0,55.0,120,12,60,40,85
+        # or D,... (DROWSY)
+        if t and t[0] in ('A', 'D', 'a', 'd'):
+            parts = t.split(',')
+            if len(parts) >= 10:  # status + 9 data fields
+                return True
+        
+        # JSON format
         if t.startswith('{'):
             return True
-        if any(t.startswith(prefix) for prefix in ("S:", "A:", "STATUS:", "ALERT:", "TEMP:", "HUM:", "METHANE:", "CO:", "LPG:", "SMOKE:", "AIR_QUALITY:", "AQI:", "GPS:(")):           
+        
+        # Key-value formats
+        if any(t.startswith(prefix) for prefix in ("AWAKE", "DROWSY", "STATUS:", "ALERT:")):
             return True
+        
         return False
 
 
-
 class LogModel(QtCore.QAbstractTableModel):
+    """Table model for displaying parsed telemetry data."""
     HEADERS = [
         "Received", "Type", "Status/Danger", "GPS", "Temp", "Hum",
         "CH4", "CO", "LPG", "Smoke", "AQI", "Reasons", "Raw"
@@ -202,6 +206,7 @@ class LogModel(QtCore.QAbstractTableModel):
             return None
         r = self._rows[index.row()]
         c = index.column()
+        
         if role == QtCore.Qt.DisplayRole:
             ts = datetime.fromtimestamp(r.timestamp).strftime("%H:%M:%S")
             if c == 0:
@@ -234,14 +239,15 @@ class LogModel(QtCore.QAbstractTableModel):
                 return ",".join(r.reasons) if r.reasons else "-"
             if c == 12:
                 return r.raw
+        
         if role == QtCore.Qt.ForegroundRole:
-            # Color coding
             if r.is_json_alert:
-                return QtGui.QBrush(QtGui.QColor("#d35400"))  # orange
+                return QtGui.QBrush(QtGui.QColor("#d35400"))
             if r.danger == "CRITICAL":
-                return QtGui.QBrush(QtGui.QColor("#c0392b"))  # red
+                return QtGui.QBrush(QtGui.QColor("#c0392b"))
             if r.danger == "WARNING":
-                return QtGui.QBrush(QtGui.QColor("#f39c12"))  # yellow
+                return QtGui.QBrush(QtGui.QColor("#f39c12"))
+        
         return None
 
     def headerData(self, section, orientation, role=QtCore.Qt.DisplayRole):
@@ -250,11 +256,13 @@ class LogModel(QtCore.QAbstractTableModel):
         return None
 
     def add_row(self, r: ParsedReading):
+        """Add a new row to the table."""
         self.beginInsertRows(QtCore.QModelIndex(), len(self._rows), len(self._rows))
         self._rows.append(r)
         self.endInsertRows()
 
     def to_csv(self, path: str):
+        """Export all data to CSV file."""
         with open(path, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             w.writerow(self.HEADERS)
@@ -278,6 +286,7 @@ class LogModel(QtCore.QAbstractTableModel):
 
 
 def parse_line(text: str) -> ParsedReading:
+    """Parse a line of telemetry data (CSV or JSON format)."""
     ts = time.time()
 
     def _to_float(val):
@@ -285,15 +294,15 @@ def parse_line(text: str) -> ParsedReading:
             if isinstance(val, (int, float)):
                 return float(val)
             s = str(val).strip()
-            # strip common unit suffixes and symbols
-            for suf in ["°C", "C", "%", "ppm", "PPM", "mg/m3", "mg/m^3", " "]:
+            # Strip common unit suffixes
+            for suf in ["°C", "C", "%", "ppm", "PPM", "mg/m3", "mg/m^3"]:
                 if s.upper().endswith(suf.upper()):
                     s = s[: -len(suf)].strip()
             return float(s)
         except Exception:
             return None
 
-    # Try JSON first (tolerate different key names)
+    # Try JSON first
     try:
         obj = json.loads(text)
         if isinstance(obj, dict):
@@ -307,14 +316,13 @@ def parse_line(text: str) -> ParsedReading:
             gps = obj.get("gps") or {}
             if isinstance(gps, dict) and ("lat" in gps or "lon" in gps):
                 r.gps = {"lat": _to_float(gps.get("lat")) or 0.0, "lon": _to_float(gps.get("lon")) or 0.0}
-            else:
-                if "lat" in obj and "lon" in obj:
-                    lt = _to_float(obj.get("lat"))
-                    ln = _to_float(obj.get("lon"))
-                    if lt is not None and ln is not None:
-                        r.gps = {"lat": lt, "lon": ln}
+            elif "lat" in obj and "lon" in obj:
+                lt = _to_float(obj.get("lat"))
+                ln = _to_float(obj.get("lon"))
+                if lt is not None and ln is not None:
+                    r.gps = {"lat": lt, "lon": ln}
 
-            # Sensors block or top-level aliases
+            # Sensors
             sensors = obj.get("sensors") or obj
             if isinstance(sensors, dict):
                 r.temperature = _to_float(sensors.get("temperature") or sensors.get("temp"))
@@ -334,109 +342,102 @@ def parse_line(text: str) -> ParsedReading:
             if isinstance(reasons, list):
                 r.reasons = [str(x) for x in reasons]
             elif isinstance(reasons, str) and reasons and reasons.upper() != "NONE":
-                r.reasons = [s for s in reasons.replace(";", ",").split(",") if s.strip()]
+                r.reasons = [s.strip() for s in reasons.replace(";", ",").split(",") if s.strip()]
 
             return r
     except Exception:
         pass
 
-
-    # Parse structured text like:
-    # AWAKE,GPS:(xx.xxxxxx,yy.yyyyyy),TEMP:..,HUM:..,METHANE:..,CO:..,LPG:..,SMOKE:..,AIR_QUALITY:..,DANGER:..,REASONS:..,TIME:..
-    # Also handles S:NONE,A:NONE style lines
+    # Parse compact CSV format: A,19.0760,72.8777,26.0,55.0,120,12,60,40,85
     r = ParsedReading(raw=text, timestamp=ts)
     try:
-        # Support both comma-separated and space-separated key-value tokens
-        sep = ',' if ',' in text else ' '
-        tokens = [p.strip() for p in text.split(sep) if p.strip()]
-        if not tokens:
+        parts = [p.strip() for p in text.split(',')]
+        if len(parts) >= 10:
+            # Decode status from first character
+            status_char = parts[0].upper()
+            if status_char == 'A':
+                r.status = "AWAKE"
+            elif status_char == 'D':
+                r.status = "DROWSY"
+            else:
+                r.status = parts[0]
+            
+            # Parse GPS
+            lat = _to_float(parts[1])
+            lon = _to_float(parts[2])
+            if lat is not None and lon is not None:
+                r.gps = {"lat": lat, "lon": lon}
+            
+            # Parse sensor values
+            r.temperature = _to_float(parts[3])
+            r.humidity = _to_float(parts[4])
+            r.methane = _to_float(parts[5])
+            r.co = _to_float(parts[6])
+            r.lpg = _to_float(parts[7])
+            r.smoke = _to_float(parts[8])
+            r.air_quality = _to_float(parts[9])
+            
+            # Determine danger level based on sensor readings
+            if r.methane and r.methane > 200:
+                r.danger = "CRITICAL"
+                r.reasons.append("High CH4")
+            elif r.co and r.co > 50:
+                r.danger = "CRITICAL"
+                r.reasons.append("High CO")
+            elif r.methane and r.methane > 150:
+                r.danger = "WARNING"
+                r.reasons.append("Elevated CH4")
+            elif r.co and r.co > 30:
+                r.danger = "WARNING"
+                r.reasons.append("Elevated CO")
+            elif r.status == "DROWSY":
+                r.danger = "WARNING"
+                r.reasons.append("Worker Drowsy")
+            else:
+                r.danger = "NORMAL"
+            
             return r
-
-        first = tokens[0]
-        up = first.strip().upper()
-        # Handle prefixes and simple statuses
-        if ':' in first or '=' in first:
-            key, val = (first.split(':', 1) if ':' in first else first.split('=', 1))
-            k = key.strip().upper()
-            v = val.strip()
-            if k in ("S", "A", "STATUS", "ALERT"):
-                r.status = v
-            elif k in ("AWAKE", "DROWSY"):
-                r.status = k
-            else:
-                r.status = first
-        else:
-            if up in ("AWAKE", "DROWSY"):
-                r.status = up
-            else:
-                r.status = first if first else None
-
-        for p in tokens[1:]:
-            if not p:
-                continue
-            # normalize key/value
-            if ':' in p:
-                key, val = p.split(':', 1)
-            elif '=' in p:
-                key, val = p.split('=', 1)
-            else:
-                key, val = p, ''
-            k = key.strip().upper()
-            v = val.strip()
-
-            if k.startswith('GPS') and v.startswith('(') and v.endswith(')'):
-                try:
-                    coords = v[1:-1]
-                    lat_s, lon_s = coords.split(',')
-                    lt = _to_float(lat_s)
-                    ln = _to_float(lon_s)
-                    if lt is not None and ln is not None:
-                        r.gps = {"lat": lt, "lon": ln}
-                except Exception:
-                    pass
-            elif k in ("TEMP", "TEMPERATURE"):
-                valf = _to_float(v)
-                if valf is not None:
-                    r.temperature = valf
-            elif k in ("HUM", "HUMIDITY", "RH"):
-                valf = _to_float(v)
-                if valf is not None:
-                    r.humidity = valf
-            elif k in ("METHANE", "CH4"):
-                valf = _to_float(v)
-                if valf is not None:
-                    r.methane = valf
-            elif k == "CO":
-                valf = _to_float(v)
-                if valf is not None:
-                    r.co = valf
-            elif k == "LPG":
-                valf = _to_float(v)
-                if valf is not None:
-                    r.lpg = valf
-            elif k in ("SMOKE", "MQ2", "MQ135"):
-                valf = _to_float(v)
-                if valf is not None:
-                    r.smoke = valf
-            elif k in ("AIR_QUALITY", "AQI", "AIRQUALITY"):
-                valf = _to_float(v)
-                if valf is not None:
-                    r.air_quality = valf
-            elif k == "DANGER":
-                r.danger = v
-            elif k == "REASONS":
-                reasons = v
-                if reasons and reasons.upper() != "NONE":
-                    r.reasons = [s for s in reasons.replace(';', ',').split(',') if s.strip()]
-            elif k == "TIME":
-                r.time_field = v
     except Exception:
         pass
+
+    # If CSV parsing failed, try key-value format
+    try:
+        tokens = [p.strip() for p in text.replace(',', ' ').split() if p.strip()]
+        if tokens:
+            first = tokens[0].upper()
+            if first in ("AWAKE", "DROWSY"):
+                r.status = first
+            
+            for token in tokens:
+                if ':' in token or '=' in token:
+                    sep = ':' if ':' in token else '='
+                    key, val = token.split(sep, 1)
+                    k = key.strip().upper()
+                    v = val.strip()
+                    
+                    if k in ("TEMP", "TEMPERATURE"):
+                        r.temperature = _to_float(v)
+                    elif k in ("HUM", "HUMIDITY"):
+                        r.humidity = _to_float(v)
+                    elif k in ("METHANE", "CH4"):
+                        r.methane = _to_float(v)
+                    elif k == "CO":
+                        r.co = _to_float(v)
+                    elif k == "LPG":
+                        r.lpg = _to_float(v)
+                    elif k in ("SMOKE", "MQ2"):
+                        r.smoke = _to_float(v)
+                    elif k in ("AIR_QUALITY", "AQI"):
+                        r.air_quality = _to_float(v)
+    except Exception:
+        pass
+
     return r
 
 
-
 class MainWindow(QtWidgets.QMainWindow):
+    """Main application window."""
+    
     def __init__(self):
         super().__init__()
         self.setWindowTitle("HC-12 Receiver - Mining Helmet Monitor")
@@ -447,11 +448,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._build_ui()
         self._connect_signals()
-
-        # Initial port scan
         self.refresh_ports()
 
-        # Timer to refresh port list periodically
+        # Port refresh timer
         self.port_timer = QtCore.QTimer(self)
         self.port_timer.setInterval(5000)
         self.port_timer.timeout.connect(self.refresh_ports)
@@ -460,11 +459,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._message_count = 0
 
     def _build_ui(self):
+        """Build the user interface."""
         central = QtWidgets.QWidget(self)
         self.setCentralWidget(central)
         layout = QtWidgets.QVBoxLayout(central)
 
-        # Top control bar
+        # Control bar
         control_layout = QtWidgets.QHBoxLayout()
         self.port_combo = QtWidgets.QComboBox()
         self.refresh_btn = QtWidgets.QPushButton("Refresh Ports")
@@ -473,6 +473,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.connect_btn = QtWidgets.QPushButton("Connect")
         self.disconnect_btn = QtWidgets.QPushButton("Disconnect")
         self.disconnect_btn.setEnabled(False)
+        
         control_layout.addWidget(QtWidgets.QLabel("Port:"))
         control_layout.addWidget(self.port_combo)
         control_layout.addWidget(self.refresh_btn)
@@ -483,19 +484,20 @@ class MainWindow(QtWidgets.QMainWindow):
         control_layout.addWidget(self.disconnect_btn)
         layout.addLayout(control_layout)
 
-        # Status bar area
+        # Status bar
         status_layout = QtWidgets.QHBoxLayout()
         self.status_label = QtWidgets.QLabel("Disconnected")
         self.status_label.setStyleSheet("color: #c0392b;")
         self.last_rx_label = QtWidgets.QLabel("Last RX: -")
         self.count_label = QtWidgets.QLabel("Messages: 0")
+        self.export_btn = QtWidgets.QPushButton("Export CSV")
+        
         status_layout.addWidget(self.status_label)
         status_layout.addSpacing(20)
         status_layout.addWidget(self.last_rx_label)
         status_layout.addSpacing(20)
         status_layout.addWidget(self.count_label)
         status_layout.addStretch(1)
-        self.export_btn = QtWidgets.QPushButton("Export CSV")
         status_layout.addWidget(self.export_btn)
         layout.addLayout(status_layout)
 
@@ -508,7 +510,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.table.setAlternatingRowColors(True)
         layout.addWidget(self.table)
 
-        # Quick gauges panel
+        # Quick gauges
         gauges = QtWidgets.QGroupBox("Latest Reading")
         g_layout = QtWidgets.QGridLayout(gauges)
         self.lbl_status = QtWidgets.QLabel("-")
@@ -521,6 +523,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_lpg = QtWidgets.QLabel("-")
         self.lbl_smoke = QtWidgets.QLabel("-")
         self.lbl_aqi = QtWidgets.QLabel("-")
+        
         labels = [
             ("Status", self.lbl_status), ("Danger", self.lbl_danger), ("GPS", self.lbl_gps),
             ("Temp", self.lbl_temp), ("Hum", self.lbl_hum), ("CH4", self.lbl_ch4),
@@ -532,6 +535,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(gauges)
 
     def _connect_signals(self):
+        """Connect UI signals to slots."""
         self.refresh_btn.clicked.connect(self.refresh_ports)
         self.connect_btn.clicked.connect(self.on_connect)
         self.disconnect_btn.clicked.connect(self.on_disconnect)
@@ -543,21 +547,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.reader.disconnected.connect(self.on_disconnected)
 
     def refresh_ports(self):
+        """Refresh the list of available serial ports."""
         current = self.port_combo.currentText()
         ports = self.reader.list_ports()
         self.port_combo.blockSignals(True)
         self.port_combo.clear()
         self.port_combo.addItems(ports)
         self.port_combo.blockSignals(False)
-        # Keep previous selection if still present
+        
         if current and current in ports:
             idx = ports.index(current)
             self.port_combo.setCurrentIndex(idx)
-        # Auto-select first if nothing chosen
-        if not current and ports:
+        elif ports:
             self.port_combo.setCurrentIndex(0)
 
     def on_connect(self):
+        """Handle connect button click."""
         port = self.port_combo.currentText()
         if not port:
             QtWidgets.QMessageBox.warning(self, "No Port", "No serial port selected.")
@@ -567,6 +572,7 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             baud = DEFAULT_BAUD
             self.baud_edit.setText(str(baud))
+        
         self.reader.connect(port, baud)
         self.status_label.setText(f"Connecting to {port}...")
         self.status_label.setStyleSheet("color: #2980b9;")
@@ -574,20 +580,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.disconnect_btn.setEnabled(True)
 
     def on_disconnect(self):
+        """Handle disconnect button click."""
         self.reader.disconnect()
 
     def on_connected(self, port: str):
+        """Handle successful connection."""
         self.status_label.setText(f"Connected: {port}")
         self.status_label.setStyleSheet("color: #27ae60;")
 
     def on_disconnected(self):
+        """Handle disconnection."""
         self.status_label.setText("Disconnected")
         self.status_label.setStyleSheet("color: #c0392b;")
         self.connect_btn.setEnabled(True)
         self.disconnect_btn.setEnabled(False)
 
     def on_port_error(self, msg: str):
-        # Non-blocking notification
+        """Handle port errors."""
         self.statusBar().showMessage(msg, 5000)
         self.status_label.setText(f"Error: {msg}")
         self.status_label.setStyleSheet("color: #c0392b;")
@@ -595,89 +604,68 @@ class MainWindow(QtWidgets.QMainWindow):
         self.disconnect_btn.setEnabled(False)
 
     def on_line(self, text: str):
+        """Handle received line of data."""
         r = parse_line(text)
         self.model.add_row(r)
         self._message_count += 1
         self.count_label.setText(f"Messages: {self._message_count}")
         self.last_rx_label.setText(f"Last RX: {datetime.now().strftime('%H:%M:%S')}")
-        # Auto-scroll to last row
+        
+        # Auto-scroll
         idx = self.model.index(self.model.rowCount()-1, 0)
         self.table.scrollTo(idx, QtWidgets.QAbstractItemView.PositionAtBottom)
-        # Update quick gauges
+        
         self._update_gauges(r)
 
     def _update_gauges(self, r: ParsedReading):
-        # Maintain last known values when partial messages arrive
+        """Update the gauge display with latest values."""
         if not hasattr(self, "_last_values"):
-            self._last_values = {
-                "status": "-", "danger": "-", "gps": None,
-                "temp": None, "hum": None, "ch4": None, "co": None,
-                "lpg": None, "smoke": None, "aqi": None
-            }
+            self._last_values = {}
 
         if r.is_json_alert:
             if r.alert_type:
                 self.lbl_status.setText(r.alert_type)
                 self.lbl_status.setStyleSheet("color:#d35400;font-weight:bold;")
-                self._last_values["status"] = r.alert_type
         else:
-            if r.status is not None:
-                self._last_values["status"] = r.status
-            if r.danger is not None:
-                self._last_values["danger"] = r.danger
-            self.lbl_status.setText(self._last_values["status"] or "-")
-            self.lbl_status.setStyleSheet("")
-            self.lbl_danger.setText(self._last_values["danger"] or "-")
-            if self._last_values["danger"] == "CRITICAL":
-                self.lbl_danger.setStyleSheet("color:#c0392b;font-weight:bold;")
-            elif self._last_values["danger"] == "WARNING":
-                self.lbl_danger.setStyleSheet("color:#f39c12;font-weight:bold;")
-            else:
-                self.lbl_danger.setStyleSheet("")
+            if r.status:
+                self.lbl_status.setText(r.status)
+                self.lbl_status.setStyleSheet("")
+            if r.danger:
+                self.lbl_danger.setText(r.danger)
+                if r.danger == "CRITICAL":
+                    self.lbl_danger.setStyleSheet("color:#c0392b;font-weight:bold;")
+                elif r.danger == "WARNING":
+                    self.lbl_danger.setStyleSheet("color:#f39c12;font-weight:bold;")
+                else:
+                    self.lbl_danger.setStyleSheet("")
 
         if r.gps:
-            self._last_values["gps"] = (r.gps.get('lat',0.0), r.gps.get('lon',0.0))
-        if self._last_values["gps"]:
-            lat, lon = self._last_values["gps"]
+            lat, lon = r.gps.get('lat', 0.0), r.gps.get('lon', 0.0)
             self.lbl_gps.setText(f"({lat:.6f},{lon:.6f})")
 
         if r.temperature is not None:
-            self._last_values["temp"] = r.temperature
-        if self._last_values["temp"] is not None:
-            self.lbl_temp.setText(f"{self._last_values['temp']:.1f} °C")
-
+            self.lbl_temp.setText(f"{r.temperature:.1f} °C")
         if r.humidity is not None:
-            self._last_values["hum"] = r.humidity
-        if self._last_values["hum"] is not None:
-            self.lbl_hum.setText(f"{self._last_values['hum']:.1f} %")
-
+            self.lbl_hum.setText(f"{r.humidity:.1f} %")
         if r.methane is not None:
-            self._last_values["ch4"] = r.methane
-        if self._last_values["ch4"] is not None:
-            self.lbl_ch4.setText(f"{self._last_values['ch4']:.1f} ppm")
-
+            self.lbl_ch4.setText(f"{r.methane:.1f} ppm")
         if r.co is not None:
-            self._last_values["co"] = r.co
-        if self._last_values["co"] is not None:
-            self.lbl_co.setText(f"{self._last_values['co']:.1f} ppm")
-
+            self.lbl_co.setText(f"{r.co:.1f} ppm")
         if r.lpg is not None:
-            self._last_values["lpg"] = r.lpg
-        if self._last_values["lpg"] is not None:
-            self.lbl_lpg.setText(f"{self._last_values['lpg']:.1f} ppm")
-
+            self.lbl_lpg.setText(f"{r.lpg:.1f} ppm")
         if r.smoke is not None:
-            self._last_values["smoke"] = r.smoke
-        if self._last_values["smoke"] is not None:
-            self.lbl_smoke.setText(f"{self._last_values['smoke']:.1f} ppm")
-
+            self.lbl_smoke.setText(f"{r.smoke:.1f} ppm")
         if r.air_quality is not None:
-            self._last_values["aqi"] = r.air_quality
-        if self._last_values["aqi"] is not None:
-            self.lbl_aqi.setText(f"{self._last_values['aqi']:.1f}")
+            self.lbl_aqi.setText(f"{r.air_quality:.1f}")
 
     def on_export(self):
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export CSV", f"hc12_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", "CSV Files (*.csv)")
+        """Export data to CSV file."""
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, 
+            "Export CSV", 
+            f"hc12_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", 
+            "CSV Files (*.csv)"
+        )
         if not path:
             return
         try:
@@ -685,6 +673,12 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, "Export", f"Saved to: {path}")
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Export Failed", str(e))
+
+    def closeEvent(self, event):
+        """Handle window close event."""
+        self.reader.disconnect()
+        self.port_timer.stop()
+        event.accept()
 
 
 def main():
