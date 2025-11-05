@@ -36,7 +36,7 @@ DEFAULT_BAUD = 9600
 
 def find_default_port():
     # Try common candidates and detected ports
-    candidates = ["/dev/ttyAMA0", "/dev/ttyS0", "/dev/ttyUSB0", "/dev/ttyUSB1", "/dev/ttyACM0", "/dev/ttyACM1"]
+    candidates = ["/dev/ttyUSB0"]
     try:
         for p in serial.tools.list_ports.comports():
             if p.device not in candidates:
