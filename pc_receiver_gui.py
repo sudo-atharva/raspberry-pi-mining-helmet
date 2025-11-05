@@ -133,14 +133,18 @@ class SerialReader(QtCore.QObject):
                         if not text:
                             continue
                         
-                        # Synchronization: discard partial/corrupt lines until we get a valid start
+                        # Synchronization: be permissive but try to align on sane line starts.
                         if not self._synchronized:
-                            if self._is_valid_line_start(text):
+                            if self._is_valid_line_start(text) or self._looks_like_kv_line(text):
                                 self._synchronized = True
-                                print(f"[SYNC] Synchronized on: {text[:50]}...")
                                 self.line_received.emit(text)
                             else:
-                                print(f"[SYNC] Discarding partial line: {text[:50]}...")
+                                # if line contains typical sensor tokens, accept anyway
+                                if any(tok in text.upper() for tok in ["TEMP", "HUM", "METHANE", "CO", "LPG", "SMOKE", "AQI", "AIR_QUALITY", "GPS", "AWAKE", "DROWSY", "S:", "A:"]):
+                                    self._synchronized = True
+                                    self.line_received.emit(text)
+                                else:
+                                    pass
                         else:
                             # Already synchronized - process all lines
                             self.line_received.emit(text)
@@ -165,14 +169,13 @@ class SerialReader(QtCore.QObject):
 
     def _is_valid_line_start(self, text: str) -> bool:
         """Check if a line starts with valid message patterns"""
-        # Valid starts: AWAKE, DROWSY, JSON object, or S: lines
-        if text.startswith('AWAKE,') or text.startswith('DROWSY,'):
+        t = text.strip()
+        # Valid starts: AWAKE, DROWSY, JSON object, or S:/A:/STATUS:/ALERT: lines, or TEMP/HUM prefixed
+        if t.startswith('AWAKE') or t.startswith('DROWSY'):
             return True
-        if text.startswith('{'):
-            # Accept any JSON object start. We won't require a "type" key here
+        if t.startswith('{'):
             return True
-        # Accept simple status-style prefixes like S: or A:
-        if text.startswith('S:') or text.startswith('A:'):
+        if any(t.startswith(prefix) for prefix in ("S:", "A:", "STATUS:", "ALERT:", "TEMP:", "HUM:", "METHANE:", "CO:", "LPG:", "SMOKE:", "AIR_QUALITY:", "AQI:", "GPS:("))):
             return True
         return False
 
@@ -276,53 +279,63 @@ class LogModel(QtCore.QAbstractTableModel):
 
 def parse_line(text: str) -> ParsedReading:
     ts = time.time()
-    # Try JSON first
+
+    def _to_float(val):
+        try:
+            if isinstance(val, (int, float)):
+                return float(val)
+            s = str(val).strip()
+            # strip common unit suffixes and symbols
+            for suf in ["°C", "C", "%", "ppm", "PPM", "mg/m3", "mg/m^3", " "]:
+                if s.upper().endswith(suf.upper()):
+                    s = s[: -len(suf)].strip()
+            return float(s)
+        except Exception:
+            return None
+
+    # Try JSON first (tolerate different key names)
     try:
         obj = json.loads(text)
         if isinstance(obj, dict):
-            # If it's an ALERT object with explicit type, keep is_json_alert True
             if obj.get("type") == "ALERT":
                 r = ParsedReading(raw=text, timestamp=ts, is_json_alert=True)
-                r.alert_type = obj.get("alert")
+                r.alert_type = obj.get("alert") or obj.get("message")
             else:
-                # Generic sensor JSON (no explicit type)
                 r = ParsedReading(raw=text, timestamp=ts, is_json_alert=False)
 
-            # GPS (could be under keys 'gps' or 'lat'/'lon')
+            # GPS
             gps = obj.get("gps") or {}
             if isinstance(gps, dict) and ("lat" in gps or "lon" in gps):
-                r.gps = {"lat": gps.get("lat", 0), "lon": gps.get("lon", 0)}
+                r.gps = {"lat": _to_float(gps.get("lat")) or 0.0, "lon": _to_float(gps.get("lon")) or 0.0}
             else:
-                # fallback: top-level lat/lon fields
                 if "lat" in obj and "lon" in obj:
-                    try:
-                        r.gps = {"lat": float(obj.get("lat")), "lon": float(obj.get("lon"))}
-                    except Exception:
-                        pass
+                    lt = _to_float(obj.get("lat"))
+                    ln = _to_float(obj.get("lon"))
+                    if lt is not None and ln is not None:
+                        r.gps = {"lat": lt, "lon": ln}
 
-            # Sensors block
-            sensors = obj.get("sensors") or {}
+            # Sensors block or top-level aliases
+            sensors = obj.get("sensors") or obj
             if isinstance(sensors, dict):
-                r.temperature = sensors.get("temperature")
-                r.humidity = sensors.get("humidity")
-                r.methane = sensors.get("methane")
-                r.co = sensors.get("co")
-                r.lpg = sensors.get("lpg")
-                r.smoke = sensors.get("smoke")
-                # optional: compute air_quality if present
-                r.air_quality = sensors.get("air_quality") or sensors.get("aqi") or r.air_quality
+                r.temperature = _to_float(sensors.get("temperature") or sensors.get("temp"))
+                r.humidity = _to_float(sensors.get("humidity") or sensors.get("hum") or sensors.get("rh"))
+                r.methane = _to_float(sensors.get("methane") or sensors.get("ch4"))
+                r.co = _to_float(sensors.get("co") or sensors.get("carbon_monoxide"))
+                r.lpg = _to_float(sensors.get("lpg"))
+                r.smoke = _to_float(sensors.get("smoke") or sensors.get("mq2") or sensors.get("mq135"))
+                aq = sensors.get("air_quality") or sensors.get("aqi") or sensors.get("airquality")
+                r.air_quality = _to_float(aq)
 
-            # Danger / reasons fields if present
+            # Status/danger
+            r.status = obj.get("status") or obj.get("state") or r.status
             if "danger" in obj:
                 r.danger = obj.get("danger")
-            if "reasons" in obj:
-                reasons = obj.get("reasons")
-                if isinstance(reasons, list):
-                    r.reasons = reasons
-                elif isinstance(reasons, str) and reasons and reasons != "NONE":
-                    r.reasons = [s for s in reasons.replace(";", ",").split(",") if s.strip()]
+            reasons = obj.get("reasons")
+            if isinstance(reasons, list):
+                r.reasons = [str(x) for x in reasons]
+            elif isinstance(reasons, str) and reasons and reasons.upper() != "NONE":
+                r.reasons = [s for s in reasons.replace(";", ",").split(",") if s.strip()]
 
-            # preserve motion and time in raw — no need to explode motion fields into columns now
             return r
     except Exception:
         pass
@@ -333,80 +346,91 @@ def parse_line(text: str) -> ParsedReading:
     # Also handles S:NONE,A:NONE style lines
     r = ParsedReading(raw=text, timestamp=ts)
     try:
-        parts = [p.strip() for p in text.split(',') if p.strip()]
-        if not parts:
+        # Support both comma-separated and space-separated key-value tokens
+        sep = ',' if ',' in text else ' '
+        tokens = [p.strip() for p in text.split(sep) if p.strip()]
+        if not tokens:
             return r
 
-        first = parts[0]
-
-        # ✅ Handle "S:NONE", "A:NONE", etc.
-        if ':' in first:
-            key, val = first.split(':', 1)
-            key = key.strip().upper()
-            val = val.strip()
-            if key in ("S", "A", "STATUS", "ALERT"):
-                r.status = val
+        first = tokens[0]
+        up = first.strip().upper()
+        # Handle prefixes and simple statuses
+        if ':' in first or '=' in first:
+            key, val = (first.split(':', 1) if ':' in first else first.split('=', 1))
+            k = key.strip().upper()
+            v = val.strip()
+            if k in ("S", "A", "STATUS", "ALERT"):
+                r.status = v
+            elif k in ("AWAKE", "DROWSY"):
+                r.status = k
             else:
-                # fallback to store as raw
                 r.status = first
         else:
-            # for plain words like AWAKE or DROWSY
-            r.status = first if first else None
+            if up in ("AWAKE", "DROWSY"):
+                r.status = up
+            else:
+                r.status = first if first else None
 
-        # Now continue with the rest of your existing parsing
-        for p in parts[1:]:
-            if p.startswith("GPS:(") and p.endswith(")"):
+        for p in tokens[1:]:
+            if not p:
+                continue
+            # normalize key/value
+            if ':' in p:
+                key, val = p.split(':', 1)
+            elif '=' in p:
+                key, val = p.split('=', 1)
+            else:
+                key, val = p, ''
+            k = key.strip().upper()
+            v = val.strip()
+
+            if k.startswith('GPS') and v.startswith('(') and v.endswith(')'):
                 try:
-                    coords = p[len("GPS:("):-1]
-                    lat_s, lon_s = coords.split(')')[0].split(',') if ')' in coords else coords.split(',')
-                    r.gps = {"lat": float(lat_s), "lon": float(lon_s)}
+                    coords = v[1:-1]
+                    lat_s, lon_s = coords.split(',')
+                    lt = _to_float(lat_s)
+                    ln = _to_float(lon_s)
+                    if lt is not None and ln is not None:
+                        r.gps = {"lat": lt, "lon": ln}
                 except Exception:
                     pass
-            elif p.startswith("TEMP:"):
-                try:
-                    r.temperature = float(str(p.split(":", 1)[1]).strip())
-                except Exception:
-                    pass
-            elif p.startswith("HUM:"):
-                try:
-                    r.humidity = float(str(p.split(":", 1)[1]).strip())
-                except Exception:
-                    pass
-            elif p.startswith("METHANE:"):
-                try:
-                    r.methane = float(str(p.split(":", 1)[1]).strip())
-                except Exception:
-                    pass
-            elif p.startswith("CO:"):
-                try:
-                    r.co = float(str(p.split(":", 1)[1]).strip())
-                except Exception:
-                    pass
-            elif p.startswith("LPG:"):
-                try:
-                    r.lpg = float(str(p.split(":", 1)[1]).strip())
-                except Exception:
-                    pass
-            elif p.startswith("SMOKE:"):
-                try:
-                    r.smoke = float(str(p.split(":", 1)[1]).strip())
-                except Exception:
-                    pass
-            elif p.startswith("AIR_QUALITY:"):
-                try:
-                    r.air_quality = float(str(p.split(":", 1)[1]).strip())
-                except Exception:
-                    pass
-            elif p.startswith("DANGER:"):
-                r.danger = p.split(":", 1)[1]
-            elif p.startswith("REASONS:"):
-                reasons = p.split(":", 1)[1]
-                if reasons and reasons != "NONE":
-                    r.reasons = [s for s in reasons.split(";") if s] if ";" in reasons else [s for s in reasons.split(",") if s]
-            elif p.startswith("TIME:"):
-                r.time_field = p.split(":", 1)[1]
+            elif k in ("TEMP", "TEMPERATURE"):
+                valf = _to_float(v)
+                if valf is not None:
+                    r.temperature = valf
+            elif k in ("HUM", "HUMIDITY", "RH"):
+                valf = _to_float(v)
+                if valf is not None:
+                    r.humidity = valf
+            elif k in ("METHANE", "CH4"):
+                valf = _to_float(v)
+                if valf is not None:
+                    r.methane = valf
+            elif k == "CO":
+                valf = _to_float(v)
+                if valf is not None:
+                    r.co = valf
+            elif k == "LPG":
+                valf = _to_float(v)
+                if valf is not None:
+                    r.lpg = valf
+            elif k in ("SMOKE", "MQ2", "MQ135"):
+                valf = _to_float(v)
+                if valf is not None:
+                    r.smoke = valf
+            elif k in ("AIR_QUALITY", "AQI", "AIRQUALITY"):
+                valf = _to_float(v)
+                if valf is not None:
+                    r.air_quality = valf
+            elif k == "DANGER":
+                r.danger = v
+            elif k == "REASONS":
+                reasons = v
+                if reasons and reasons.upper() != "NONE":
+                    r.reasons = [s for s in reasons.replace(';', ',').split(',') if s.strip()]
+            elif k == "TIME":
+                r.time_field = v
     except Exception:
-        # Leave as raw
         pass
     return r
 
@@ -583,37 +607,74 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_gauges(r)
 
     def _update_gauges(self, r: ParsedReading):
+        # Maintain last known values when partial messages arrive
+        if not hasattr(self, "_last_values"):
+            self._last_values = {
+                "status": "-", "danger": "-", "gps": None,
+                "temp": None, "hum": None, "ch4": None, "co": None,
+                "lpg": None, "smoke": None, "aqi": None
+            }
+
         if r.is_json_alert:
-            # Keep previous status; highlight danger label
             if r.alert_type:
                 self.lbl_status.setText(r.alert_type)
                 self.lbl_status.setStyleSheet("color:#d35400;font-weight:bold;")
+                self._last_values["status"] = r.alert_type
         else:
-            self.lbl_status.setText(r.status or "-")
+            if r.status is not None:
+                self._last_values["status"] = r.status
+            if r.danger is not None:
+                self._last_values["danger"] = r.danger
+            self.lbl_status.setText(self._last_values["status"] or "-")
             self.lbl_status.setStyleSheet("")
-            self.lbl_danger.setText(r.danger or "-")
-            if r.danger == "CRITICAL":
+            self.lbl_danger.setText(self._last_values["danger"] or "-")
+            if self._last_values["danger"] == "CRITICAL":
                 self.lbl_danger.setStyleSheet("color:#c0392b;font-weight:bold;")
-            elif r.danger == "WARNING":
+            elif self._last_values["danger"] == "WARNING":
                 self.lbl_danger.setStyleSheet("color:#f39c12;font-weight:bold;")
             else:
                 self.lbl_danger.setStyleSheet("")
+
         if r.gps:
-            self.lbl_gps.setText(f"({r.gps.get('lat',0):.6f},{r.gps.get('lon',0):.6f})")
+            self._last_values["gps"] = (r.gps.get('lat',0.0), r.gps.get('lon',0.0))
+        if self._last_values["gps"]:
+            lat, lon = self._last_values["gps"]
+            self.lbl_gps.setText(f"({lat:.6f},{lon:.6f})")
+
         if r.temperature is not None:
-            self.lbl_temp.setText(f"{r.temperature:.1f} °C")
+            self._last_values["temp"] = r.temperature
+        if self._last_values["temp"] is not None:
+            self.lbl_temp.setText(f"{self._last_values['temp']:.1f} °C")
+
         if r.humidity is not None:
-            self.lbl_hum.setText(f"{r.humidity:.1f} %")
+            self._last_values["hum"] = r.humidity
+        if self._last_values["hum"] is not None:
+            self.lbl_hum.setText(f"{self._last_values['hum']:.1f} %")
+
         if r.methane is not None:
-            self.lbl_ch4.setText(f"{r.methane:.1f} ppm")
+            self._last_values["ch4"] = r.methane
+        if self._last_values["ch4"] is not None:
+            self.lbl_ch4.setText(f"{self._last_values['ch4']:.1f} ppm")
+
         if r.co is not None:
-            self.lbl_co.setText(f"{r.co:.1f} ppm")
+            self._last_values["co"] = r.co
+        if self._last_values["co"] is not None:
+            self.lbl_co.setText(f"{self._last_values['co']:.1f} ppm")
+
         if r.lpg is not None:
-            self.lbl_lpg.setText(f"{r.lpg:.1f} ppm")
+            self._last_values["lpg"] = r.lpg
+        if self._last_values["lpg"] is not None:
+            self.lbl_lpg.setText(f"{self._last_values['lpg']:.1f} ppm")
+
         if r.smoke is not None:
-            self.lbl_smoke.setText(f"{r.smoke:.1f} ppm")
+            self._last_values["smoke"] = r.smoke
+        if self._last_values["smoke"] is not None:
+            self.lbl_smoke.setText(f"{self._last_values['smoke']:.1f} ppm")
+
         if r.air_quality is not None:
-            self.lbl_aqi.setText(f"{r.air_quality:.1f}")
+            self._last_values["aqi"] = r.air_quality
+        if self._last_values["aqi"] is not None:
+            self.lbl_aqi.setText(f"{self._last_values['aqi']:.1f}")
 
     def on_export(self):
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export CSV", f"hc12_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", "CSV Files (*.csv)")
