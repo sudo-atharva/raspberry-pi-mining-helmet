@@ -209,7 +209,6 @@ class ModernBossMonitorGUI:
         """Check if we have permission to access the port"""
         import os
         import stat
-        import platform
         
         try:
             # Check if port exists
@@ -223,33 +222,26 @@ class ModernBossMonitorGUI:
             # Check if current user has read/write permission
             has_rw = bool(st.st_mode & stat.S_IRUSR) and bool(st.st_mode & stat.S_IWUSR)
             
-            # Check group permissions on Arch Linux vs other distros
+            # Check if current user is in the dialout group (Linux)
             import grp
             import pwd
             username = pwd.getpwuid(os.getuid())[0]
             groups = [g.gr_name for g in grp.getgrall() if username in g.gr_mem]
             
-            # Check for both 'dialout' and 'uucp' groups (Arch uses uucp for serial)
-            if platform.system() == 'Linux':
-                if 'uucp' in groups or 'dialout' in groups:
-                    print(f"User {username} is in required group (uucp or dialout)")
-                    return True
-            
-            # Check for direct permissions
+            if 'dialout' in groups:
+                print(f"User {username} is in dialout group")
+                return True
+                
             if has_rw:
                 print(f"User has direct read/write permission to {port}")
                 return True
             
-            # If we get here, show appropriate message
-            if platform.system() == 'Linux':
-                print(f"Permission denied for {port}. Add user to 'uucp' group: 'sudo usermod -a -G uucp $USER'")
-            else:
-                print(f"Permission denied for {port}. Please check your user permissions.")
+            print(f"Permission denied for {port}. Add user to dialout group or run with sudo")
             return False
             
         except Exception as e:
             print(f"Error checking permissions: {e}")
-            return True  # Assume we can try anyway if there's an error checking permissions
+            return False
 
     def auto_connect(self):
         """Try to connect to HC-12 automatically"""
