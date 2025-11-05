@@ -175,7 +175,7 @@ class SerialReader(QtCore.QObject):
             return True
         if t.startswith('{'):
             return True
-        if any(t.startswith(prefix) for prefix in ("S:", "A:", "STATUS:", "ALERT:", "TEMP:", "HUM:", "METHANE:", "CO:", "LPG:", "SMOKE:", "AIR_QUALITY:", "AQI:", "GPS:("))):
+        if any(t.startswith(prefix) for prefix in ("S:", "A:", "STATUS:", "ALERT:", "TEMP:", "HUM:", "METHANE:", "CO:", "LPG:", "SMOKE:", "AIR_QUALITY:", "AQI:", "GPS:(")):           
             return True
         return False
 
