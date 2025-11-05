@@ -154,7 +154,7 @@ def main():
         print(f"Failed to open {port}: {e}")
         sys.exit(2)
 
-    interval = 1.0 / max(0.1, args.hz)
+    interval = 5.0 / max(0.1, args.hz)
     i = 0
     t0 = time.time()
     try:
